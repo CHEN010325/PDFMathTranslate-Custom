@@ -32,6 +32,11 @@ the items below (upstream changes may conflict or make a patch obsolete).
    absolute paths: the precise-kernel worker subprocess runs with its own
    cwd (the submodule dir), so relative paths (e.g. `pdf2zh_files/x.pdf`
    from the GUI) failed with "File does not exist".
+4. **`pdf2zh/gui.py`** — after translation, use the output paths reported
+   by the kernel (`TranslateResult.mono_pdf/dual_pdf`) instead of assuming
+   legacy naming (`-mono.pdf`). The precise kernel writes
+   `.zh.mono.pdf`/`.zh.dual.pdf`; without this the GUI raised
+   "Error: No output" *after* a successful translation.
 
 ## Submodule patch (applied via `patches/apply_patches.sh`)
 

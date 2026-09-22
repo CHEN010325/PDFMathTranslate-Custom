@@ -387,7 +387,7 @@ def translate_file(
             ignore_cache=ignore_cache,
             vfont=vfont,
         )
-        kernel.translate(
+        results = kernel.translate(
             request,
             callback=progress_bar,
             cancellation_event=cancellation_event_map[session_id],
@@ -395,6 +395,16 @@ def translate_file(
     except CancelledError:
         del cancellation_event_map[session_id]
         raise gr.Error("Translation cancelled")
+
+    # Prefer the paths the kernel actually produced — output naming
+    # differs between kernels (legacy: "-mono.pdf"/"-dual.pdf",
+    # precise: ".zh.mono.pdf"/".zh.dual.pdf").
+    for result in results:
+        if result.mono_pdf and Path(result.mono_pdf).exists():
+            file_mono = Path(result.mono_pdf)
+        if result.dual_pdf and Path(result.dual_pdf).exists():
+            file_dual = Path(result.dual_pdf)
+
     print(f"Files after translation: {os.listdir(output)}")
 
     if not file_mono.exists() or not file_dual.exists():
