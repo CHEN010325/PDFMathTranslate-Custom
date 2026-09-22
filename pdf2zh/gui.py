@@ -634,10 +634,13 @@ with gr.Blocks(
                 interactive=True,
             )
             gr.Markdown("## Option")
+            _saved_service = ConfigManager.get("PDF2ZH_SERVICE", enabled_services[0])
+            if _saved_service not in enabled_services:
+                _saved_service = enabled_services[0]
             service = gr.Dropdown(
                 label="Service",
                 choices=enabled_services,
-                value=enabled_services[0],
+                value=_saved_service,
             )
             ollama_model = gr.Dropdown(
                 label="Ollama Model",
@@ -666,10 +669,13 @@ with gr.Blocks(
                     choices=lang_map.keys(),
                     value=ConfigManager.get("PDF2ZH_LANG_TO", "Simplified Chinese"),
                 )
+            _saved_pages = ConfigManager.get("PDF2ZH_PAGES", list(page_map.keys())[0])
+            if _saved_pages not in page_map:
+                _saved_pages = list(page_map.keys())[0]
             page_range = gr.Radio(
                 choices=page_map.keys(),
                 label="Pages",
-                value=list(page_map.keys())[0],
+                value=_saved_pages,
             )
 
             page_input = gr.Textbox(
@@ -681,7 +687,9 @@ with gr.Blocks(
             with gr.Accordion("Open for More Experimental Options!", open=False):
                 gr.Markdown("#### Experimental")
                 threads = gr.Textbox(
-                    label="number of threads", interactive=True, value="4"
+                    label="number of threads",
+                    interactive=True,
+                    value=ConfigManager.get("PDF2ZH_THREADS", "4"),
                 )
                 skip_subset_fonts = gr.Checkbox(
                     label="Skip font subsetting", interactive=True, value=False
@@ -706,6 +714,7 @@ with gr.Blocks(
                 envs.append(prompt)
 
             def on_select_service(service, evt: gr.EventData = None):
+                ConfigManager.set("PDF2ZH_SERVICE", service)
                 translator = service_map[service]
                 _envs = []
                 for i in range(4):
@@ -765,6 +774,7 @@ with gr.Blocks(
                 )
 
             def on_select_page(choice):
+                ConfigManager.set("PDF2ZH_PAGES", choice)
                 if choice == "Others":
                     return gr.update(visible=True)
                 else:
@@ -792,11 +802,28 @@ with gr.Blocks(
                 elem_classes=["secondary-text"],
             )
             page_range.select(on_select_page, page_range, page_input)
+            lang_from.select(
+                lambda v: ConfigManager.set("PDF2ZH_LANG_FROM", v), lang_from, None
+            )
+            lang_to.select(
+                lambda v: ConfigManager.set("PDF2ZH_LANG_TO", v), lang_to, None
+            )
+            threads.change(
+                lambda v: ConfigManager.set("PDF2ZH_THREADS", v), threads, None
+            )
             service.select(
                 on_select_service,
                 service,
                 envs + [ollama_model],
             )
+
+            def save_ollama_model(model, evt: gr.EventData = None):
+                if model:
+                    ConfigManager.set_env_by_translatername(
+                        OllamaTranslator, "OLLAMA_MODEL", model
+                    )
+
+            ollama_model.input(save_ollama_model, ollama_model, None)
             # The service dropdown's initial value never fires .select(),
             # so initialize the env fields (incl. the Ollama model list)
             # on page load as well.

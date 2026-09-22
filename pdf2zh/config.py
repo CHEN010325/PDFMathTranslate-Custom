@@ -184,6 +184,29 @@ class ConfigManager:
             return default
 
     @classmethod
+    def set_env_by_translatername(cls, translater_name, name, value):
+        """设置 translator 的某个 env 并持久化"""
+        instance = cls.get_instance()
+        with instance._lock:
+            translators = instance._config_data.get("translators", [])
+            for translator in translators:
+                if translator.get("name") == translater_name.name:
+                    translator.setdefault("envs", {})[name] = value
+                    instance._save_config()
+                    return
+            translators.append(
+                {
+                    "name": translater_name.name,
+                    "envs": {
+                        **copy.deepcopy(translater_name.envs),
+                        name: value,
+                    },
+                }
+            )
+            instance._config_data["translators"] = translators
+            instance._save_config()
+
+    @classmethod
     def delete(cls, key):
         """删除配置值并保存"""
         instance = cls.get_instance()
