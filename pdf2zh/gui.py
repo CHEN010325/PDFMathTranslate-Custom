@@ -634,9 +634,17 @@ with gr.Blocks(
                 interactive=True,
             )
             gr.Markdown("## Option")
-            _saved_service = ConfigManager.get("PDF2ZH_SERVICE", enabled_services[0])
-            if _saved_service not in enabled_services:
-                _saved_service = enabled_services[0]
+            # Restore last-used service (case-insensitive match: the
+            # display names are capitalized, e.g. "Ollama").
+            _saved_service = str(ConfigManager.get("PDF2ZH_SERVICE", "") or "")
+            _saved_service = next(
+                (
+                    s
+                    for s in enabled_services
+                    if s.lower() == _saved_service.lower()
+                ),
+                enabled_services[0],
+            )
             service = gr.Dropdown(
                 label="Service",
                 choices=enabled_services,
