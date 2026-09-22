@@ -46,11 +46,22 @@ the items below (upstream changes may conflict or make a patch obsolete).
    possibly stuck in a repetition loop (temperature 0) until the budget is
    exhausted — the GUI progress bar appears frozen meanwhile.
 
+   **Since 2026-09-23 the precise kernel venv runs `pdf2zh-next==2.9.0`
+   installed from PyPI** (not the editable submodule checkout, whose branch
+   only had 2.8.2). The patch is applied to the *installed* file
+   `.venv/Lib/site-packages/pdf2zh_next/translator/translator_impl/ollama.py`
+   in **two** places (`do_translate` and `do_llm_translate`). After any
+   `pip install -U pdf2zh-next` inside the venv, re-apply it:
+   replace `self.options["num_predict"] = max_token` with
+   `self.options["num_predict"] = min(max_token, 8192)` in both spots.
+
 ## Environment notes
 
 - The precise kernel lives in an isolated venv at
-  `pdf2zh/kernel/PDFMathTranslate-next.git/.venv` (pdf2zh_next 2.7.1,
-  babeldoc 0.5.24). Rebuild with `pdf2zh-setup-precise` if needed.
+  `pdf2zh/kernel/PDFMathTranslate-next.git/.venv`
+  (pdf2zh-next **2.9.0** from PyPI + babeldoc 0.6.2). The submodule checkout
+  is no longer the runtime source; it only satisfies `PreciseKernel`
+  availability checks (dir + pyproject.toml).
 - Layout parsing (DocLayout-YOLO) and OCR (PaddleOCR v4 det) run locally
   via ONNX Runtime; models cached under `~/.cache/babeldoc/models/`.
 - Keep `.gradio/`, `pdf2zh_files/` out of commits (runtime artifacts).
