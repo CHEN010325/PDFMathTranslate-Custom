@@ -2,7 +2,6 @@ import asyncio
 import cgi
 import os
 import shutil
-import socket
 import uuid
 from asyncio import CancelledError
 from pathlib import Path
@@ -12,12 +11,12 @@ import gradio as gr
 import requests
 import tqdm
 from gradio_pdf import PDF
-from string import Template
 import logging
 
 from pdf2zh import __version__
+# NOTE: `translate` is kept even though the kernel layer calls it lazily —
+# importing it here warms up babeldoc assets at GUI startup (upstream behavior).
 from pdf2zh.high_level import translate
-from pdf2zh.doclayout import ModelInstance
 from pdf2zh.config import ConfigManager
 from pdf2zh.translator import (
     AnythingLLMTranslator,
@@ -313,7 +312,7 @@ def translate_file(
     _envs = {}
     for i, env in enumerate(translator.envs.items()):
         _envs[env[0]] = envs[i]
-    if service == "ollama" and ollama_model:
+    if translator.name == "ollama" and ollama_model:
         _envs["OLLAMA_MODEL"] = ollama_model
     for k, v in _envs.items():
         if str(k).upper().endswith("API_KEY") and str(v) == "***":
@@ -348,24 +347,6 @@ def translate_file(
         threads = int(threads)
     except ValueError:
         threads = 1
-
-    param = {
-        "files": [str(file_raw)],
-        "pages": selected_page,
-        "lang_in": lang_from,
-        "lang_out": lang_to,
-        "service": f"{translator.name}",
-        "output": output,
-        "thread": int(threads),
-        "callback": progress_bar,
-        "cancellation_event": cancellation_event_map[session_id],
-        "envs": _envs,
-        "prompt": Template(prompt) if prompt else None,
-        "skip_subset_fonts": skip_subset_fonts,
-        "ignore_cache": ignore_cache,
-        "vfont": vfont,  # 添加自定义公式字体正则表达式
-        "model": ModelInstance.value,
-    }
 
     try:
         from pdf2zh.kernel import KernelRegistry
@@ -956,16 +937,6 @@ def parse_user_passwd(file_path: str) -> tuple:
     except FileNotFoundError:
         print(f"Error: File '{file_path[0]}' not found.")
     return tuple_list, content
-
-
-def _has_ipv6() -> bool:
-    """Check whether the system can bind an IPv6 socket."""
-    try:
-        sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-        sock.close()
-        return True
-    except OSError:
-        return False
 
 
 def setup_gui(
