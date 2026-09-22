@@ -175,8 +175,8 @@ def create_parser() -> argparse.ArgumentParser:
         "--mode",
         type=str,
         choices=["fast", "precise"],
-        default="fast",
-        help="Translation mode: fast (v1) or precise (v2, requires pdf2zh_next).",
+        default="precise",
+        help="Translation mode: precise (v2, highest quality, default) or fast (v1).",
     )
 
     parse_params.add_argument(

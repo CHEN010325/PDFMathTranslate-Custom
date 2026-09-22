@@ -233,6 +233,7 @@ def translate_file(
     ignore_cache,
     vfont,
     mode_choice,
+    ollama_model,
     recaptcha_response,
     state,
     progress=gr.Progress(),
@@ -312,6 +313,8 @@ def translate_file(
     _envs = {}
     for i, env in enumerate(translator.envs.items()):
         _envs[env[0]] = envs[i]
+    if service == "ollama" and ollama_model:
+        _envs["OLLAMA_MODEL"] = ollama_model
     for k, v in _envs.items():
         if str(k).upper().endswith("API_KEY") and str(v) == "***":
             # Load Real API_KEYs from local configure file
@@ -322,7 +325,20 @@ def translate_file(
 
     print(f"Files before translation: {os.listdir(output)}")
 
-    def progress_bar(t: tqdm.tqdm):
+    def progress_bar(t):
+        # Legacy kernel yields tqdm-like objects; the precise kernel
+        # yields dict progress events (see kernel/v2_worker.py).
+        if isinstance(t, dict):
+            if t.get("type") == "error":
+                raise gr.Error(f"Translation failed: {t.get('message', 'unknown')}")
+            desc = "{} ({}/{})".format(
+                t.get("stage") or "Translating...",
+                t.get("stage_current", 0),
+                t.get("stage_total", 0),
+            )
+            # babeldoc's overall_progress is on a 0-100 scale.
+            progress((t.get("overall_progress") or 0.0) / 100, desc=desc)
+            return
         desc = getattr(t, "desc", "Translating...")
         if desc == "":
             desc = "Translating..."
@@ -564,6 +580,16 @@ tech_details_string = f"""
 cancellation_event_map = {}
 
 
+def get_ollama_models(host: str) -> list:
+    """Query the local Ollama server for installed model names."""
+    try:
+        resp = requests.get(f"{host.rstrip('/')}/api/tags", timeout=3)
+        resp.raise_for_status()
+        return [m["name"] for m in resp.json().get("models", [])]
+    except Exception:
+        return []
+
+
 # The following code creates the GUI
 with gr.Blocks(
     title="PDFMathTranslate - PDF Translation with preserved formats",
@@ -602,6 +628,14 @@ with gr.Blocks(
                 label="Service",
                 choices=enabled_services,
                 value=enabled_services[0],
+            )
+            ollama_model = gr.Dropdown(
+                label="Ollama Model",
+                choices=[],
+                value=None,
+                allow_custom_value=True,
+                visible=False,
+                interactive=True,
             )
             envs = []
             for i in range(3):
@@ -656,23 +690,46 @@ with gr.Blocks(
                 mode_choice = gr.Dropdown(
                     label="Translation Mode",
                     choices=["fast", "precise"],
-                    value="fast",
+                    value="precise",
                     interactive=True,
                 )
                 envs.append(prompt)
 
-            def on_select_service(service, evt: gr.EventData):
+            def on_select_service(service, evt: gr.EventData = None):
                 translator = service_map[service]
                 _envs = []
                 for i in range(4):
                     _envs.append(gr.update(visible=False, value=""))
+                model_update = gr.update(visible=False, value=None)
+                if translator.name == "ollama":
+                    host = ConfigManager.get_env_by_translatername(
+                        translator,
+                        "OLLAMA_HOST",
+                        translator.envs["OLLAMA_HOST"],
+                    )
+                    model_default = ConfigManager.get_env_by_translatername(
+                        translator,
+                        "OLLAMA_MODEL",
+                        translator.envs["OLLAMA_MODEL"],
+                    )
+                    models = get_ollama_models(host)
+                    model_update = gr.update(
+                        visible=True,
+                        choices=models,
+                        value=model_default
+                        if not models or model_default in models
+                        else models[0],
+                    )
                 for i, env in enumerate(translator.envs.items()):
                     label = env[0]
                     value = ConfigManager.get_env_by_translatername(
                         translator, env[0], env[1]
                     )
                     visible = True
-                    if hidden_gradio_details:
+                    if label == "OLLAMA_MODEL":
+                        # The dedicated Ollama Model dropdown handles this.
+                        visible = False
+                    elif hidden_gradio_details:
                         if (
                             "MODEL" not in str(label).upper()
                             and value
@@ -688,6 +745,7 @@ with gr.Blocks(
                         value=value,
                     )
                 _envs[-1] = gr.update(visible=translator.CustomPrompt)
+                _envs.append(model_update)
                 return _envs
 
             def on_select_filetype(file_type):
@@ -727,7 +785,15 @@ with gr.Blocks(
             service.select(
                 on_select_service,
                 service,
-                envs,
+                envs + [ollama_model],
+            )
+            # The service dropdown's initial value never fires .select(),
+            # so initialize the env fields (incl. the Ollama model list)
+            # on page load as well.
+            demo.load(
+                on_select_service,
+                inputs=[service],
+                outputs=envs + [ollama_model],
             )
             vfont.change(on_vfont_change, inputs=vfont, outputs=None)
             file_type.select(
@@ -796,6 +862,7 @@ with gr.Blocks(
             ignore_cache,
             vfont,
             mode_choice,
+            ollama_model,
             recaptcha_response,
             state,
             *envs,
@@ -879,14 +946,21 @@ def setup_gui(
         demo.launch(server_name="0.0.0.0", max_file_size="5mb", inbrowser=True)
         return
 
-    # Try binding addresses in order: "::" accepts both IPv4+IPv6 on most
-    # dual-stack systems, "0.0.0.0" is IPv4-only, "127.0.0.1" is loopback,
-    # and finally fall back to Gradio's share mode.
-    bind_addresses = []
-    if _has_ipv6():
-        bind_addresses.append("[::]")
-    bind_addresses.append("0.0.0.0")
-    bind_addresses.append("127.0.0.1")
+    # Keep Gradio's internal localhost health check away from system
+    # proxies: with a global-mode proxy the check fails, which cascades
+    # into the share-tunnel fallback — that downloads frpc, which
+    # antivirus software flags on every launch.
+    no_proxy_hosts = "localhost,127.0.0.1,::1"
+    os.environ["NO_PROXY"] = os.environ.get("NO_PROXY", no_proxy_hosts)
+    os.environ["no_proxy"] = os.environ.get("no_proxy", no_proxy_hosts)
+
+    # Windows Python sockets bind "::" IPv6-only (no IPv4 dual-stack),
+    # which kills 127.0.0.1 access; prefer IPv4 there. On other systems
+    # "::" is dual-stack and preferred.
+    if os.name == "nt":
+        bind_addresses = ["0.0.0.0", "[::]", "127.0.0.1"]
+    else:
+        bind_addresses = ["[::]", "0.0.0.0", "127.0.0.1"]
 
     for addr in bind_addresses:
         try:
@@ -905,12 +979,14 @@ def setup_gui(
                 "This may be caused by global mode of proxy software."
             )
 
-    # Last resort: let Gradio create a share link
+    # Last resort: retry without pinning the port. Never fall back to
+    # share=True automatically — sharing downloads frpc, which antivirus
+    # software commonly flags; users opt into it with --share.
+    print("All local addresses failed, retrying with an auto-selected port.")
     demo.launch(
         debug=True,
         inbrowser=True,
-        share=True,
-        server_port=server_port,
+        share=share,
         **auth_kwargs,
     )
 

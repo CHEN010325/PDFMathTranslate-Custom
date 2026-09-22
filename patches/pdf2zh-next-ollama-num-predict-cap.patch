@@ -1,0 +1,17 @@
+diff --git a/pdf2zh_next/translator/translator_impl/ollama.py b/pdf2zh_next/translator/translator_impl/ollama.py
+index ba8e92d..37e2b2e 100644
+--- a/pdf2zh_next/translator/translator_impl/ollama.py
++++ b/pdf2zh_next/translator/translator_impl/ollama.py
+@@ -48,7 +48,11 @@ class OllamaTranslator(BaseTranslator):
+     )
+     def do_translate(self, text, rate_limit_params: dict = None) -> str:
+         if (max_token := len(text) * 5) > self.options["num_predict"]:
+-            self.options["num_predict"] = max_token
++            # Cap the budget: len(text)*5 is far more than any real
++            # translation needs, and an unbounded value lets a huge
++            # paragraph (dense tables/formulas) grind for ~15 minutes,
++            # possibly stuck in a repetition loop until the budget ends.
++            self.options["num_predict"] = min(max_token, 8192)
+         response = self.client.chat(
+             model=self.model,
+             options=self.options,
