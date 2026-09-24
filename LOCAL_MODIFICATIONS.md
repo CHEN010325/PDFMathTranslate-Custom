@@ -5,6 +5,45 @@ This repository carries local customizations on top of
 Rebase this branch onto `upstream/main` after pulling updates, then re-check
 the items below (upstream changes may conflict or make a patch obsolete).
 
+## 2026-09-24 — Single-environment switch + custom history tab + webapp UI
+
+- The fork's main `.venv` (pdf2zh 1.9.12 GUI shell) is **deleted**.
+- **Primary UI now: `custom_pdf2zh/webapp/`** — a FastAPI + vanilla-JS "PDF 翻译
+  工作台" whose UI replicates the user's reference project
+  (`D:\mineru-pdf-translate-node-json-export`, Electron app): topbar / sidebar
+  (settings + task-history cards with ↻/×) / dual-pane workbench (original left,
+  translation right) with proportional sync scrolling. Pages are rendered
+  server-side by pymupdf (`/api/page` PNG cache) — no PDF.js/CDN dependency.
+  Launch: Desktop `PDF翻译.bat` → `python -m custom_pdf2zh.webapp.server`
+  (needs `PYTHONPATH=<repo root>`, port 7860). `PDF翻译-高级.bat` launches the
+  upstream Gradio GUI on 7861 for advanced engine settings.
+  Key gotcha: `SettingsModel(translate_engine_settings=OllamaSettings(...))` —
+  the engine field is REQUIRED at construction (no default).
+- The Gradio GUI also has the injected 📚 翻译历史 tab (see below); both UIs
+  share the same `pdf2zh_files/` library.
+- **New: 📚 翻译历史 tab** injected into the venv's `gui.py` by
+  `script/apply_all_patches.py` (idempotent, re-run after any
+  `pip install -U pdf2zh-next/babeldoc` in the kernel venv):
+  - `custom_pdf2zh/history_tab.py` (in-repo, imported via sys.path injection):
+    scans `pdf2zh_files/**` for past translations (`_imported/` for manual
+    imports, `_sidecache/` for generated views), and re-composes alternating
+    dual PDFs into per-page left-original/right-translation pages.
+  - Three view modes: 双面对照 (merged side-by-side, default), 双语原版
+    (raw alternating dual), 纯译文 (extracted translated pages).
+  - Fallback: non-alternating dual PDFs are shown as-is (heuristic: page 1
+    has no CJK, page 2 has >20 CJK chars).
+- **Ollama translator patches** (both the submodule runtime copy AND the venv
+  site-packages copy — the bridge sets `PYTHONPATH=<submodule>` so the
+  submodule copy is what actually runs under the old fork shell; the venv
+  copy is what runs under the native GUI):
+  `num_predict = min(max_token, 8192)` ×2, None-guard on token counters ×2,
+  `stop_after_attempt` 100→5 ×2. All applied by `apply_all_patches.py`.
+- `patches/apply_patches.sh` is superseded (it never worked: `git -C` resolves
+  the patch path inside the submodule dir).
+- Kernel venv: pdf2zh-next 2.9.0 + BabelDOC 0.6.4 (pymupdf 1.28.2 exceeds
+  pdf2zh-next's declared <1.25.3 but all smoke tests pass; rollback:
+  `pip install babeldoc==0.6.2 "pymupdf<1.25.3"`).
+
 ## Main repo changes (committed on the `custom` branch)
 
 1. **`pdf2zh/pdf2zh.py`** — `--mode` defaults to `precise` (highest quality,

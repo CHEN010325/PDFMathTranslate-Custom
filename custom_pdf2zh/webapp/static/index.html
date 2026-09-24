@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PDF 翻译工作台</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark">译</div>
+          <div>
+            <div class="brand-name">PDF 翻译工作台</div>
+            <div class="brand-subtitle">BabelDOC 精准翻译引擎</div>
+          </div>
+        </div>
+        <div class="workflow-title">
+          <span class="page-title-static">文档翻译任务</span>
+          <span id="status" class="top-status">就绪</span>
+        </div>
+        <div class="topbar-actions">
+          <span id="settings-state" class="status-pill">引擎检测中…</span>
+          <button id="open-output" type="button" class="outline-button">打开输出位置</button>
+        </div>
+      </header>
+
+      <div class="workspace">
+        <aside class="sidebar">
+          <div class="sidebar-actions">
+            <button id="new-task" type="button" class="new-task-button">
+              <span class="button-icon">+</span>
+              新翻译任务
+            </button>
+          </div>
+
+          <details class="settings-panel" open>
+            <summary>
+              <span class="summary-icon">⚙</span>
+              翻译设置
+            </summary>
+            <div class="settings-grid compact">
+              <label>
+                <span>翻译服务</span>
+                <select id="engine" name="engine">
+                  <option value="ollama">Ollama（本地）</option>
+                </select>
+              </label>
+              <label>
+                <span>Ollama 模型</span>
+                <select id="ollamaModel" name="ollamaModel"></select>
+              </label>
+              <label>
+                <span>Ollama 地址</span>
+                <input id="ollamaHost" name="ollamaHost" value="http://localhost:11434" />
+              </label>
+              <label>
+                <span>源语言</span>
+                <select id="sourceLanguage" name="sourceLanguage"></select>
+              </label>
+              <label>
+                <span>目标语言</span>
+                <select id="targetLanguage" name="targetLanguage"></select>
+              </label>
+              <div class="settings-actions">
+                <button id="save-settings" type="button" class="primary-button">保存</button>
+              </div>
+            </div>
+          </details>
+
+          <div class="task-tabs">
+            <button class="task-tab active" type="button" data-filter="all">最近任务</button>
+            <button class="task-tab" type="button" data-filter="done">已完成</button>
+          </div>
+          <div class="task-tools">
+            <div class="search-box">
+              <span>⌕</span>
+              <input id="task-search" placeholder="搜索文件" />
+            </div>
+            <button id="clear-history" type="button" class="outline-button task-clear-button">清空</button>
+          </div>
+          <div class="task-list" id="task-list">
+            <div class="task-empty">上传文档后会出现在这里。</div>
+          </div>
+        </aside>
+
+        <main id="translate-view" class="document-workbench view active">
+          <section class="source-pane">
+            <div class="pane-header">
+              <div>
+                <div class="pane-kicker">原文件</div>
+                <h2 id="source-title">等待上传文档</h2>
+              </div>
+              <div class="source-meta" id="source-meta">PDF · 本地预览</div>
+            </div>
+
+            <div class="source-body">
+              <div class="source-viewer" id="source-viewer">
+                <div id="source-empty" class="drop-zone">
+                  <div class="drop-symbol">PDF</div>
+                  <h3>选择文档开始翻译</h3>
+                  <p>支持 PDF，可多选。默认英语译为简体中文，排版与公式由 BabelDOC 精准还原，输出单语与双语对照 PDF。</p>
+                  <div class="drop-actions">
+                    <button type="button" class="primary-button" id="pick-pdf">选择文件（可多选）</button>
+                  </div>
+                </div>
+                <div id="source-preview" class="pdf-page-list" title="原文件预览" hidden></div>
+              </div>
+              <input id="inputPdf" type="hidden" />
+            </div>
+          </section>
+
+          <section class="result-pane">
+            <div class="pane-header result-header">
+              <div class="result-header-main">
+                <div class="result-heading">
+                  <div class="pane-kicker">翻译结果 <span class="model-name" id="active-model-name"></span></div>
+                  <h2 id="result-title">等待任务</h2>
+                </div>
+                <div class="result-actions">
+                  <button id="open-mono" type="button" class="outline-button" disabled>单语</button>
+                  <button id="open-dual" type="button" class="primary-button" disabled>对照</button>
+                  <button id="open-alt" type="button" class="outline-button" disabled>双语</button>
+                </div>
+              </div>
+              <div class="view-tabs">
+                <button class="view-tab active" type="button" data-result-view="translation">译文 PDF</button>
+                <button class="view-tab" type="button" data-result-view="log">运行日志</button>
+              </div>
+            </div>
+
+            <div id="result-viewer" class="result-viewer">
+              <div id="result-empty" class="empty-result">
+                上传并翻译后，译文 PDF 会在这里显示。
+              </div>
+              <div id="translated-preview" class="pdf-page-list" title="译文预览" hidden></div>
+              <pre id="log" class="log-panel" hidden></pre>
+              <div id="progress-card" class="progress-card" hidden>
+                <div class="spinner"></div>
+                <div>
+                  <strong id="progress-title">正在处理</strong>
+                  <span id="progress-detail">准备开始</span>
+                </div>
+              </div>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <input id="file-input" type="file" accept="application/pdf,.pdf" multiple hidden />
+    <script type="module" src="/static/app.mjs"></script>
+  </body>
+</html>
