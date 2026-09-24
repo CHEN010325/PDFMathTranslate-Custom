@@ -5,6 +5,30 @@ This repository carries local customizations on top of
 Rebase this branch onto `upstream/main` after pulling updates, then re-check
 the items below (upstream changes may conflict or make a patch obsolete).
 
+## 2026-09-25 — 工作台第二轮:去水印 / 页锚定同步 / 静态缓存治理 / 默认模型定档
+
+- **默认翻译模型定档** `s2021008840/hy-mt2:7b-q4_k_m`:官方技术报告
+  (arXiv:2605.22064)Table 5 实测 Q4_K_M 相比 BF16 仅 -0.16 XCOMET,
+  速度/显存更优;工作台设置、engine.py 默认值、批量脚本三处一致。
+- **关闭 BabelDOC 水印行**:`engine.py` 设
+  `sm.pdf.watermark_output_mode = "no_watermark"`(正式配置项),
+  此后所有翻译产物(单语/对照)不含"本文档由 funstory.ai…"横幅;
+  存量交付文件用 pymupdf 按行矩形 redaction 精确抹除(正文零误伤)。
+  注意:no_watermark 模式下输出文件名带 `.no_watermark.` 中缀,
+  库扫描的 `_normalize` 分组规则已天然兼容。
+- **双栏同步滚动修复**:原实现把滚动监听绑在外层 viewer 上,而实际滚动
+  发生在内层 `.pdf-page-list`(#source-preview/#translated-preview),
+  导致左栏滚动不触发同步。现绑定内层列表,并将"总高度比例同步"升级为
+  **按页锚定同步**(第 N 页原文 ↔ 第 N 页译文 + 页内分数位置;两侧页数
+  不一致时按比例映射页序号;90ms driver-lock 消除程序滚动回声)。
+- **静态资源缓存治理**:浏览器曾长期缓存旧版 app.mjs(transferSize=0)
+  导致前端改动不生效。`server.py` 增加 `NoCacheStaticFiles`
+  (Cache-Control: no-cache),`index.html` 以 `app.mjs?v=2` 引用;
+  **今后每次修改前端 JS/CSS 需递增该版本号**(或依赖 no-cache 头的强制复验)。
+- 本地 Ollama 模型精简:仅保留 `hy-mt2:7b-q4_k_m`(默认)与 qwen/gemma 通用
+  备选;已发布的 `s2021008840/hy-mt2` 全部 9 个标签在 ollama.com 上不受影响,
+  `ollama pull` 随时可找回。
+
 ## 2026-09-24 — Single-environment switch + custom history tab + webapp UI
 
 - The fork's main `.venv` (pdf2zh 1.9.12 GUI shell) is **deleted**.

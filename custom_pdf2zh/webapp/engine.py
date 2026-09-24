@@ -29,7 +29,7 @@ JOBS_FILE = LIBRARY_ROOT / "_jobs.json"
 
 DEFAULT_SETTINGS: dict = {
     "engine": "ollama",
-    "ollama_model": "s2021008840/hy-mt2:7b-q8_0",
+    "ollama_model": "s2021008840/hy-mt2:7b-q4_k_m",
     "ollama_host": "http://localhost:11434",
     "lang_in": "en",
     "lang_out": "zh",
@@ -517,6 +517,7 @@ async def _run(task_id: str, pdf_path: Path, settings: dict) -> None:
         sm.translation.lang_in = settings.get("lang_in", "en")
         sm.translation.lang_out = settings.get("lang_out", "zh")
         sm.translation.output = str(out_dir)
+        sm.pdf.watermark_output_mode = "no_watermark"  # 商用交付:关闭 BabelDOC 水印行
 
         entry["stage"] = "启动翻译内核"
         publish_changed()

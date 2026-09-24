@@ -40,7 +40,16 @@ def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+class NoCacheStaticFiles(StaticFiles):
+    """静态资源禁用启发式缓存,保证前端改动刷新即生效。"""
+
+    def file_response(self, *args, **kwargs):
+        resp = super().file_response(*args, **kwargs)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+
+app.mount("/static", NoCacheStaticFiles(directory=STATIC_DIR), name="static")
 
 
 # ---------------------------------------------------------------------------

@@ -245,18 +245,46 @@ async function renderPdfList(container, relPath) {
   container.append(frag);
 }
 
+/* 按页锚定同步:src 滚到第 idx 页的第 frac 处,dst 对齐到同一页同一位置。
+   两侧页数不一致时按比例映射页序号。 */
+function pageAnchoredSync(src, dst) {
+  const srcPages = src.querySelectorAll(".pdf-page");
+  const dstPages = dst.querySelectorAll(".pdf-page");
+  if (!srcPages.length || !dstPages.length) return;
+  const top = src.scrollTop + 4;
+  let idx = 0;
+  for (let i = 0; i < srcPages.length; i++) {
+    if (srcPages[i].offsetTop <= top) idx = i;
+    else break;
+  }
+  const sp = srcPages[idx];
+  const frac =
+    sp.offsetHeight > 0
+      ? Math.min(1, Math.max(0, (top - sp.offsetTop) / sp.offsetHeight))
+      : 0;
+  const di = Math.min(
+    dstPages.length - 1,
+    Math.round((idx * (dstPages.length - 1)) / Math.max(1, srcPages.length - 1))
+  );
+  const dp = dstPages[di];
+  dst.scrollTop = Math.max(
+    0,
+    Math.min(dst.scrollHeight - dst.clientHeight, dp.offsetTop + frac * dp.offsetHeight - 4)
+  );
+}
+
 function bindSyncScroll(a, b) {
-  let lock = null;
-  const handler = (src, dst) => () => {
-    if (lock && lock !== src) return;
-    lock = src;
-    const denom = src.scrollHeight - src.clientHeight;
-    const ratio = denom > 0 ? src.scrollTop / denom : 0;
-    dst.scrollTop = ratio * (dst.scrollHeight - dst.clientHeight);
-    requestAnimationFrame(() => (lock = null));
+  let driver = null;
+  let timer = null;
+  const make = (src, dst) => () => {
+    if (driver && driver !== src) return; // 对方正在驱动,忽略自身被程序滚动的回声
+    driver = src;
+    pageAnchoredSync(src, dst);
+    clearTimeout(timer);
+    timer = setTimeout(() => (driver = null), 90);
   };
-  a.addEventListener("scroll", handler(a, b), { passive: true });
-  b.addEventListener("scroll", handler(b, a), { passive: true });
+  a.addEventListener("scroll", make(a, b), { passive: true });
+  b.addEventListener("scroll", make(b, a), { passive: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -581,7 +609,9 @@ function bindUI() {
     if (rel) window.open(`/api/file?path=${encodeURIComponent(rel)}&download=1`);
   };
 
-  bindSyncScroll($("source-viewer"), $("translated-preview"));
+  // 关键:滚动发生在内层 .pdf-page-list(#source-preview / #translated-preview),
+  // 外层 viewer 不会产生滚动事件
+  bindSyncScroll($("source-preview"), $("translated-preview"));
 }
 
 async function main() {
