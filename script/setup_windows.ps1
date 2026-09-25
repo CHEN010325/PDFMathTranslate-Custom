@@ -100,9 +100,11 @@ if (Get-Command $ollama -ErrorAction SilentlyContinue) {
 }
 
     # 预下载 BabelDOC 排版/公式模型资产(~1-2GB): 没有这一步, 用户首次翻译时
-    # 才会从 funstory CDN 下载, 国内网络可能很慢甚至失败(--warmup 只下载校验后退出)
-    Write-Host "      预下载 BabelDOC 模型资产 (--warmup) ..."
-    & (Join-Path $venv "Scripts\pdf2zh_next.exe") --warmup
+    # 才会从 funstory CDN 下载, 国内网络可能很慢甚至失败
+    # 注: pdf2zh_next --warmup 在 2.9.0 会先下载资产、再因缺 input 文件断言退出
+    #     (误报失败), 这里直接调 babeldoc 的 warmup, 干净退出
+    Write-Host "      预下载 BabelDOC 模型资产 (版面模型/字体, 约 1-2GB) ..."
+    & (Join-Path $venv "Scripts\python.exe") -c "from babeldoc.assets import assets; assets.warmup()"
     if ($LASTEXITCODE -ne 0) {
         Write-Host "      [警告] 资产预下载失败, 首次翻译时会自动重试。" -ForegroundColor Yellow
     } else {
@@ -122,6 +124,31 @@ set "PDF2ZH_PORT=$port"
 pause
 "@ | Out-File -FilePath $launcher -Encoding ascii
 
+# 静默启动器(双击桌面图标的目标): 服务在跑 → 直接打开网页;
+# 没在跑 → 无黑窗隐藏启动(bat 里 server 就绪后会自己打开网页)
+# 内容保持纯 ASCII: wscript 对非 ASCII 的 .vbs 依赖系统代码页, 易乱码
+$hiddenLauncher = Join-Path $repo "start_workbench_hidden.vbs"
+@"
+' PDF Translation Workbench silent launcher (no console window).
+' If the service is already running, just open the web page;
+' otherwise start it hidden (the server opens the page when ready).
+Dim sh, http, url, launcher, running
+url = "http://127.0.0.1:$port/"
+launcher = "$launcher"
+Set sh = CreateObject("WScript.Shell")
+On Error Resume Next
+Set http = CreateObject("MSXML2.XMLHTTP")
+http.Open "GET", url, False
+http.Send
+running = (Err.Number = 0)
+On Error GoTo 0
+If running Then
+    sh.Run url
+Else
+    sh.Run Chr(34) & launcher & Chr(34), 0, False
+End If
+"@ | Out-File -FilePath $hiddenLauncher -Encoding ascii
+
 if ($skipShortcut) {
     Write-Host "      按要求跳过桌面快捷方式。"
 } else {
@@ -129,10 +156,11 @@ if ($skipShortcut) {
         $desktop = [Environment]::GetFolderPath("Desktop")
         $shell = New-Object -ComObject WScript.Shell
         $lnk = $shell.CreateShortcut((Join-Path $desktop "PDF翻译工作台.lnk"))
-        $lnk.TargetPath = $launcher
+        $lnk.TargetPath = $hiddenLauncher
         $lnk.WorkingDirectory = $repo
+        $lnk.IconLocation = Join-Path $kernel ".venv\Scripts\python.exe,0"
         $lnk.Save()
-        Write-Host "      桌面快捷方式已创建。"
+        Write-Host "      桌面快捷方式已创建(双击=静默启动+自动打开网页)。"
     } catch {
         Write-Host "      [警告] 快捷方式创建失败, 可直接运行 start_workbench.bat" -ForegroundColor Yellow
     }
@@ -141,7 +169,8 @@ if ($skipShortcut) {
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host " 部署完成! 正在启动工作台 (浏览器将自动打开, 端口 $port) ..."
-Write-Host " 关闭弹出的窗口即停止服务; 日常启动用 start_workbench.bat"
+Write-Host " 日常使用: 双击桌面「PDF翻译工作台」图标(无黑窗, 自动打开网页)"
+Write-Host " 停止服务: 网页右上角「关闭服务」按钮"
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host ""
 Set-Location $kernel

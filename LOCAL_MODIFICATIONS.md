@@ -5,6 +5,24 @@ This repository carries local customizations on top of
 Rebase this branch onto `upstream/main` after pulling updates, then re-check
 the items below (upstream changes may conflict or make a patch obsolete).
 
+## 2026-09-25 — 从零重部署实测 + 预热误报修复 + 桌面图标静默启动
+
+- **全量删除后从零重部署实测通过**:按用户要求删除本地全部代码与资源
+  (仓库、venv、BabelDOC 资产缓存、翻译缓存、hy-mt2 两个模型;用户数据
+  先备份到仓库外 `PDFMathTranslate-数据备份-20260925/`),按 README 流程
+  `git clone --recursive` + `script\setup_windows.bat` 一键重装,端到端
+  翻译验证通过(7b 默认模型,单页约 30 秒,术语提取默认跳过)。
+- **修复预热误报**:`pdf2zh_next --warmup` 在 2.9.0 先下载资产、再因
+  "At least one input file is required" 断言非零退出(资产实际已下载,
+  但部署日志误报"预下载失败");改为直接调
+  `python -c "from babeldoc.assets import assets; assets.warmup()"`,
+  干净退出。
+- **桌面图标静默启动**:桌面「PDF翻译工作台」快捷方式改指
+  `start_workbench_hidden.vbs`(内容纯 ASCII,规避 wscript 系统代码页
+  乱码坑):服务在跑 → 直接打开网页;未跑 → 无黑窗隐藏启动
+  (`start_workbench.bat` 保留作控制台调试用)。停止服务用网页右上角
+  「关闭服务」按钮。
+
 ## 2026-09-25 — 工作台第三轮:全引擎接入 / 删除级联 / 残影治理 / 优雅停机
 
 - **接入官方全部 23 种翻译服务**:`engine.py` 从内核
