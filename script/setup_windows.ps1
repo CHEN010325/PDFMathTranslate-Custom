@@ -176,17 +176,18 @@ if (Get-Command $ollama -ErrorAction SilentlyContinue) {
 # ---- 6. 启动器与桌面快捷方式 ----
 Write-Host "[6/6] 生成启动器 ..."
 $launcher = Join-Path $repo "start_workbench.bat"
+# 用 %~dp0 相对定位, bat 不含机器路径, 可跨机器复制同步(微信/U盘传给客户)
 @"
 @echo off
 title PDF Translation Workbench
-cd /d "$kernel"
-set "PYTHONPATH=$repo"
+cd /d "%~dp0pdf2zh\kernel\PDFMathTranslate-next.git"
+set "PYTHONPATH=%~dp0"
 set "PDF2ZH_PORT=$port"
-rem 本地 Ollama(127.0.0.1)绕开系统代理: 客户机常见死代理会把 localhost
-rem 请求也塞进代理导致引擎检查/翻译卡死超时; 对真实外网的代理保持原样
+rem Bypass system proxy for local Ollama (127.0.0.1): a dead system proxy
+rem would swallow localhost requests too (engine check / translation timeouts)
 set "NO_PROXY=127.0.0.1,localhost"
 set "no_proxy=127.0.0.1,localhost"
-".venv\Scripts\python.exe" -m custom_pdf2zh.webapp.server $port
+".venv\Scripts\python.exe" -m custom_pdf2zh.webapp.server %PDF2ZH_PORT%
 pause
 "@ | Out-File -FilePath $launcher -Encoding ascii
 Log "启动器已生成: $launcher"
@@ -199,9 +200,12 @@ $hiddenLauncher = Join-Path $repo "start_workbench_hidden.vbs"
 ' PDF Translation Workbench silent launcher (no console window).
 ' If the service is already running, just open the web page;
 ' otherwise start it hidden (the server opens the page when ready).
-Dim sh, http, url, launcher, running
+' Paths derived from this script's own location - portable across machines.
+Dim sh, http, url, fso, repo, launcher, running
+Set fso = CreateObject("Scripting.FileSystemObject")
+repo = fso.GetParentFolderName(WScript.ScriptFullName)
 url = "http://127.0.0.1:$port/"
-launcher = "$launcher"
+launcher = repo & "\start_workbench.bat"
 Set sh = CreateObject("WScript.Shell")
 On Error Resume Next
 Set http = CreateObject("MSXML2.XMLHTTP")
