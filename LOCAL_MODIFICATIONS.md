@@ -5,6 +5,37 @@ This repository carries local customizations on top of
 Rebase this branch onto `upstream/main` after pulling updates, then re-check
 the items below (upstream changes may conflict or make a patch obsolete).
 
+## 2026-09-25 — 工作台第三轮:全引擎接入 / 删除级联 / 残影治理 / 优雅停机
+
+- **接入官方全部 23 种翻译服务**:`engine.py` 从内核
+  `TRANSLATION_ENGINE_METADATA_MAP` 自省派生服务注册表(内核升级自动跟上),
+  `/api/services` 下发;前端设置面板按 服务→动态字段 渲染(密钥用密码框,
+  留空走官方默认值),Ollama 模型字段在本地模型列表可用时渲染真下拉;
+  设置结构升级为 `engine + engine_fields`,旧版扁平配置自动迁移,
+  已存 API Key 可从界面清除(空值=删除)。
+- **删除/清空级联清理缓存**:`delete_entries` 删除任务时同步清
+  `_sidecache` 的派生视图(左原文右译文/仅译文/仅原文)与页面渲染缓存;
+  页面渲染缓存改为**按源文件路径分桶**(`pages/<sha1(path)[:16]>/`),
+  启动时 `purge_orphan_cache()` 清旧版平铺缓存与源文件已消失的孤儿视图
+  (实测清出 153MB)。
+- **前端"残影"治理**:引入视图代际(viewSeq/nextRenderGen),在途的
+  `renderPdfList`/`openTask`/`startTranslate` 被更新的视图切换取代后自动
+  丢弃,修复"点重新翻译后旧预览回填到进度卡后面"的竞态;
+  运行日志改为"贴底才跟随"滚动,并给面板顶部留 12px 空隙,
+  滚动到中间位置时日志行不再贴着页签条渲染。
+- **Ollama 富文本占位标签泄漏修复**(子模块 + patch):
+  小模型会把 babeldoc 的 `<style id='N'>` 标签打碎(如 `<style id="5>`),
+  回贴正则认不出导致标签原样漏进译文;`ollama.py` 输出侧把碎形归一化回
+  规范形(`patches/pdf2zh-next-ollama-style-tag-normalize.patch`)。
+- **自动术语表提取开关**(默认关):对应官方 `no_auto_extract_glossary`;
+  本地小模型下术语提取(块数×1 次 LLM 调用)耗时近半且质量有限,默认关闭,
+  用云端大模型时可打开提升术语一致性;非 LLM 引擎强制跳过不受开关影响。
+- **关闭服务**:右上角按钮 → `/api/shutdown` 优雅停机(uvicorn
+  `timeout_graceful_shutdown=3` 兜底 SSE 长连接);有任务运行时默认拦截,
+  force 时先取消任务;状态均已落盘,停机不丢数据。
+- 移除 `num_predict`(最大输出 token)表单项:翻译器按输入长度自动放大,
+  手动设置会被覆盖、设小会截断译文;仍可通过 settings JSON 高级配置。
+
 ## 2026-09-25 — 子模块补丁持久化到自有 fork
 
 - 子模块 `pdf2zh_next/translator/translator_impl/ollama.py` 的三组补丁

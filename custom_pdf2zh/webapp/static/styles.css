@@ -838,11 +838,13 @@ select:focus {
 
 .log-panel {
   position: absolute;
-  inset: 0;
+  /* 顶部留出空隙:滚动到中间位置时日志行不会贴着页签条渲染(缠影) */
+  inset: 12px 0 0 0;
   margin: 0;
   overflow: auto;
   padding: 22px 24px;
   border: 0;
+  border-top: 1px solid var(--line);
   color: #1e293b;
   background: #ffffff;
   white-space: pre-wrap;
@@ -964,4 +966,44 @@ select:focus {
     border-right: 0;
     border-bottom: 1px solid var(--line);
   }
+}
+
+/* 动态引擎字段:让内部 label 直接参与 .settings-grid 布局 */
+#engine-fields {
+  display: contents;
+}
+
+#engine-fields .field-hint {
+  grid-column: 1;
+  margin: 0;
+  padding: 6px 2px 2px;
+  color: var(--faint);
+  font-size: 12px;
+}
+
+/* 关闭服务按钮:红色描边警示 */
+.danger-button {
+  color: #dc2626;
+  border-color: #fca5a5;
+}
+
+.danger-button:hover {
+  background: #fef2f2;
+}
+
+/* 设置面板里的开关行:复选框与文字同行 */
+.settings-grid .toggle-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.settings-grid .toggle-field input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  min-width: 15px;
+  padding: 0;
+  accent-color: var(--brand);
+  cursor: pointer;
 }

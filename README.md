@@ -32,7 +32,8 @@ script\setup_windows.bat
 
 | 操作 | 方式 |
 |---|---|
-| 日常启动 | 桌面「PDF翻译工作台」快捷方式,或仓库内 `启动工作台.bat` |
+| 日常启动 | 桌面「PDF翻译工作台」快捷方式,或仓库内 `start_workbench.bat`(部署脚本生成) |
+| 关闭服务 | 右上角「关闭服务」按钮(有任务在跑会先拦截);或直接关闭服务控制台窗口 |
 | 高级参数 GUI(冷门引擎配置) | 运行内核目录下 `.venv\Scripts\pdf2zh_next.exe --gui --server-port 7861` |
 | 引擎升级后恢复定制补丁 | `script\apply_all_patches.py`(幂等,一键重放全部补丁) |
 | 详细改动说明 | 见 [LOCAL_MODIFICATIONS.md](LOCAL_MODIFICATIONS.md) |

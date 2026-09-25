@@ -1,0 +1,47 @@
+diff --git a/pdf2zh_next/translator/translator_impl/ollama.py b/pdf2zh_next/translator/translator_impl/ollama.py
+index c13c5c4..89093b2 100644
+--- a/pdf2zh_next/translator/translator_impl/ollama.py
++++ b/pdf2zh_next/translator/translator_impl/ollama.py
+@@ -1,4 +1,5 @@
+ import logging
++import re
+ 
+ import ollama
+ from babeldoc.utils.atomic_integer import AtomicInteger
+@@ -13,6 +14,22 @@ from tenacity import wait_exponential
+ 
+ logger = logging.getLogger(__name__)
+ 
++# babeldoc 用 <style id='N'>…</style> 保护带样式的文本段(如彩色引用链接)。
++# 小模型常把标签打碎后输出(如 <style id="5>、<style id="9>"),回贴正则只认
++# 规范形,残缺标签会原样漏进译文。这里把各种碎形归一化回规范形:
++#  - 右标签还在 → 样式正常回贴;
++#  - 右标签被模型丢掉 → 归一化后的标签会被 il_translator 的兜底清理剥掉,
++#    退化为无样式纯文本,而不是残留乱码。
++_STYLE_TAG_RE = re.compile(
++    r"<\s*style\s+id\s*=\s*[\"']?\s*(\d+)\s*[\s\"'>}]*>?\s*[\"']?"
++)
++
++
++def _normalize_style_tags(text: str) -> str:
++    if "<" not in text:
++        return text
++    return _STYLE_TAG_RE.sub(r"<style id='\1'>", text)
++
+ 
+ class OllamaTranslator(BaseTranslator):
+     # https://github.com/ollama/ollama
+@@ -60,6 +77,7 @@ class OllamaTranslator(BaseTranslator):
+             self.completion_token_count.inc(response.eval_count)
+         message = response.message.content.strip()
+         message = self._remove_cot_content(message)
++        message = _normalize_style_tags(message)
+         return message
+ 
+     @retry(
+@@ -91,4 +109,5 @@ class OllamaTranslator(BaseTranslator):
+             self.completion_token_count.inc(response.eval_count)
+         message = response.message.content.strip()
+         message = self._remove_cot_content(message)
++        message = _normalize_style_tags(message)
+         return message

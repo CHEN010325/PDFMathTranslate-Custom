@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import subprocess
 import sys
@@ -53,6 +54,8 @@ app.mount("/static", NoCacheStaticFiles(directory=STATIC_DIR), name="static")
 
 # 启动回填:历史已完成任务的成品补齐到成品文件夹
 engine.ensure_all_exports()
+# 启动清理:旧版平铺页面缓存 + 源文件已消失的派生视图缓存
+engine.purge_orphan_cache()
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +190,38 @@ async def cancel(request: Request) -> dict:
     return {"cancelled": ok}
 
 
+@app.post("/api/shutdown")
+async def shutdown(request: Request) -> dict:
+    """优雅关闭工作台服务。
+
+    有任务在跑时默认拒绝;force=true 会先取消任务再退出。
+    状态都已落盘(登记表/设置),停机不丢数据。
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    running = list(engine.RUNNING)
+    if running and not body.get("force"):
+        return {
+            "ok": False,
+            "running": len(running),
+            "message": f"有 {len(running)} 个任务正在运行，无法关闭",
+        }
+    for task_id in running:
+        engine.cancel_translation(task_id)
+
+    async def _exit_later():
+        await asyncio.sleep(0.3)  # 先让本响应送达浏览器
+        if _server is not None:
+            _server.should_exit = True
+        else:
+            os._exit(0)
+
+    asyncio.create_task(_exit_later())
+    return {"ok": True}
+
+
 @app.post("/api/open-library")
 def open_library() -> dict:
     engine.EXPORT_DIR.mkdir(parents=True, exist_ok=True)
@@ -215,6 +250,12 @@ def langs() -> dict:
     return engine.LANGS
 
 
+@app.get("/api/services")
+def services() -> dict:
+    """全部支持的翻译服务及其表单字段定义(与官方 pdf2zh-next 对齐)。"""
+    return {"services": engine.service_registry(), "groups": engine.GROUP_LABELS}
+
+
 @app.get("/api/ollama-models")
 async def ollama_models() -> dict:
     """读取本地 Ollama 已装模型,失败时返回空列表(前端回退为手填)。
@@ -223,7 +264,9 @@ async def ollama_models() -> dict:
     """
     import urllib.request
 
-    host = engine.load_settings().get("ollama_host", "http://localhost:11434")
+    host = engine.load_settings().get("engine_fields", {}).get(
+        "ollama_host", "http://localhost:11434"
+    )
     try:
         req = urllib.request.Request(
             host.rstrip("/") + "/api/tags", headers={"Accept": "application/json"}
@@ -249,9 +292,17 @@ async def translate(request: Request) -> dict:
     body = await request.json()
     pdf_path = engine._resolve(body["path"])
     settings = engine.load_settings()
-    for key in ("engine", "ollama_model", "ollama_host", "lang_in", "lang_out"):
+    for key in ("engine", "lang_in", "lang_out"):
         if body.get(key):
             settings[key] = body[key]
+    if "auto_extract_glossary" in body:
+        settings["auto_extract_glossary"] = bool(body["auto_extract_glossary"])
+    if isinstance(body.get("engine_fields"), dict):
+        for key, value in body["engine_fields"].items():
+            if value is None or (isinstance(value, str) and not value.strip()):
+                settings["engine_fields"].pop(key, None)
+            else:
+                settings["engine_fields"][key] = value
     task_id = engine.start_translation(pdf_path, settings)
     return {"task_id": task_id}
 
@@ -280,15 +331,25 @@ async def events(request: Request) -> EventSourceResponse:
 # 入口
 # ---------------------------------------------------------------------------
 
+# uvicorn.Server 实例,/api/shutdown 通过它触发优雅退出
+_server = None
+
 
 def main() -> None:
+    global _server
     import uvicorn
 
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 7860
     url = f"http://127.0.0.1:{port}"
     print(f"PDF 翻译工作台: {url}", flush=True)
     threading_timer(port, url)
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    # SSE 是长连接,优雅停机最多等 3 秒就强制断开,保证"关闭服务"能退干净
+    config = uvicorn.Config(
+        app, host="127.0.0.1", port=port, log_level="warning",
+        timeout_graceful_shutdown=3,
+    )
+    _server = uvicorn.Server(config)
+    _server.run()
 
 
 def threading_timer(port: int, url: str) -> None:

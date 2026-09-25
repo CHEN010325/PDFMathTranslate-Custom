@@ -15,6 +15,8 @@ import hashlib
 import json
 import re
 import time
+import types
+import typing
 from datetime import datetime
 from pathlib import Path
 
@@ -30,12 +32,228 @@ SETTINGS_FILE = LIBRARY_ROOT / "_webapp_settings.json"
 JOBS_FILE = LIBRARY_ROOT / "_jobs.json"
 
 DEFAULT_SETTINGS: dict = {
-    "engine": "ollama",
-    "ollama_model": "s2021008840/hy-mt2:7b-q4_k_m",
-    "ollama_host": "http://localhost:11434",
+    "engine": "Ollama",
+    "engine_fields": {
+        "ollama_model": "s2021008840/hy-mt2:7b-q4_k_m",
+        "ollama_host": "http://localhost:11434",
+    },
     "lang_in": "en",
     "lang_out": "zh",
+    # 自动术语表提取(官方 no_auto_extract_glossary 的反向开关):
+    # LLM 引擎默认开,保证术语全文一致;本地小模型耗时翻倍,工作台默认关
+    "auto_extract_glossary": False,
 }
+
+# ---------------------------------------------------------------------------
+# 翻译服务注册表:与官方 pdf2zh-next 的全部翻译引擎对齐,
+# 表单字段直接从内核的 pydantic 设置模型自省派生,内核升级自动跟上。
+# ---------------------------------------------------------------------------
+
+# 服务中文展示名与分组;group: free=免配置 local=本地 llm=大模型云服务 trad=传统翻译
+SERVICE_META: dict[str, dict] = {
+    "Google": {"label": "Google 翻译", "group": "free"},
+    "Bing": {"label": "必应翻译", "group": "free"},
+    "SiliconFlowFree": {"label": "硅基流动（免费）", "group": "free"},
+    "Ollama": {"label": "Ollama（本地）", "group": "local"},
+    "Xinference": {"label": "Xinference（本地）", "group": "local"},
+    "ClaudeCode": {"label": "Claude Code（本地 CLI）", "group": "local"},
+    "OpenAI": {"label": "OpenAI", "group": "llm"},
+    "DeepSeek": {"label": "DeepSeek", "group": "llm"},
+    "Zhipu": {"label": "智谱 AI", "group": "llm"},
+    "SiliconFlow": {"label": "硅基流动", "group": "llm"},
+    "Gemini": {"label": "Google Gemini", "group": "llm"},
+    "Grok": {"label": "xAI Grok", "group": "llm"},
+    "Groq": {"label": "Groq", "group": "llm"},
+    "ModelScope": {"label": "魔搭 ModelScope", "group": "llm"},
+    "AliyunDashScope": {"label": "阿里云百炼", "group": "llm"},
+    "AzureOpenAI": {"label": "Azure OpenAI", "group": "llm"},
+    "OpenAICompatible": {"label": "OpenAI 兼容接口", "group": "llm"},
+    "DeepL": {"label": "DeepL", "group": "trad"},
+    "Azure": {"label": "Azure 翻译", "group": "trad"},
+    "TencentMechineTranslation": {"label": "腾讯云翻译", "group": "trad"},
+    "QwenMt": {"label": "阿里 QwenMT", "group": "trad"},
+    "AnythingLLM": {"label": "AnythingLLM", "group": "trad"},
+    "Dify": {"label": "Dify", "group": "trad"},
+}
+GROUP_LABELS = {
+    "free": "免费 / 无需配置",
+    "local": "本地部署",
+    "llm": "大模型服务(填 API Key)",
+    "trad": "传统翻译服务",
+}
+
+_FIELD_LABELS = (
+    ("_api_key", "API Key"),
+    ("apikey", "API Key"),
+    ("auth_key", "Auth Key"),
+    ("secret_id", "Secret ID"),
+    ("secret_key", "Secret Key"),
+    ("_model", "模型"),
+    ("_base_url", "接口地址"),
+    ("_host", "服务地址"),
+    ("endpoint", "接口地址"),
+    ("_url", "服务地址"),
+    ("api_version", "API 版本"),
+    ("_timeout", "超时(秒)"),
+    ("claude_code_path", "claude 命令路径"),
+)
+# 不放进表单的高级开关,留空时走官方默认值
+_SKIP_FIELD_SUFFIXES = (
+    "_enable_json_mode",
+    "_send_temperature",
+    "_send_reasoning_effort",
+    "_reasoning_effort",
+    "_enable_thinking",
+    "_send_enable_thinking_param",
+    "ali_domains",
+    # 内部调优参数:翻译器会按输入长度自动放大 num_predict,手动设置会被覆盖,
+    # 设小了反而截断译文,不暴露给用户
+    "num_predict",
+)
+_SECRET_HINTS = ("api_key", "apikey", "auth_key", "secret_key", "secret_id")
+
+_service_cache: list[dict] | None = None
+
+
+def _norm_engine(name: str) -> str:
+    """引擎名大小写归一(旧配置里存的是小写 ollama),并校验存在性。"""
+    from pdf2zh_next.config.translate_engine_model import (
+        TRANSLATION_ENGINE_METADATA_MAP,
+    )
+
+    if name in TRANSLATION_ENGINE_METADATA_MAP:
+        return name
+    low = (name or "").lower()
+    for key in TRANSLATION_ENGINE_METADATA_MAP:
+        if key.lower() == low:
+            return key
+    return name or "Ollama"
+
+
+def _field_label(name: str) -> str:
+    for suffix, label in _FIELD_LABELS:
+        if name == suffix or name.endswith(suffix):
+            return label
+    return name
+
+
+def service_registry() -> list[dict]:
+    """全部翻译服务的表单定义,按 免费→本地→大模型→传统 排序。"""
+    global _service_cache
+    if _service_cache is not None:
+        return _service_cache
+    from pdf2zh_next.config.translate_engine_model import TRANSLATION_ENGINE_METADATA
+
+    out: list[dict] = []
+    for m in TRANSLATION_ENGINE_METADATA:
+        info = SERVICE_META.get(
+            m.translate_engine_type,
+            {"label": m.translate_engine_type, "group": "llm"},
+        )
+        fields: list[dict] = []
+        for name, f in m.setting_model_type.model_fields.items():
+            if name in ("translate_engine_type", "support_llm"):
+                continue
+            if any(name.endswith(s) for s in _SKIP_FIELD_SUFFIXES):
+                continue
+            default = f.default
+            if default is None and f.default_factory is not None:
+                try:
+                    default = f.default_factory()
+                except Exception:
+                    default = None
+            fields.append(
+                {
+                    "name": name,
+                    "label": _field_label(name),
+                    "default": "" if default is None else str(default),
+                    "secret": any(h in name.lower() for h in _SECRET_HINTS),
+                }
+            )
+        out.append(
+            {
+                "type": m.translate_engine_type,
+                "label": info["label"],
+                "group": info["group"],
+                "llm": m.support_llm,
+                "fields": fields,
+            }
+        )
+    order = {"free": 0, "local": 1, "llm": 2, "trad": 3}
+    out.sort(key=lambda s: (order.get(s["group"], 9), s["label"]))
+    _service_cache = out
+    return out
+
+
+def _coerce_field_value(annotation, value):
+    """按 pydantic 字段类型宽松归一表单值;解析失败返回 None(改用官方默认值)。"""
+    origin = typing.get_origin(annotation)
+    if origin is typing.Union or origin is types.UnionType:  # Optional[X] / X | None
+        args = [a for a in typing.get_args(annotation) if a is not type(None)]
+        if len(args) == 1:
+            return _coerce_field_value(args[0], value)
+        return value
+    if annotation is bool:
+        if isinstance(value, bool):
+            return value
+        low = str(value).strip().lower()
+        if low in ("true", "1", "yes", "y", "on"):
+            return True
+        if low in ("false", "0", "no", "n", "off"):
+            return False
+        return None
+    if annotation in (int, float):
+        try:
+            return annotation(value)
+        except (TypeError, ValueError):
+            return None
+    return value
+
+
+def build_engine_settings(settings: dict):
+    """把工作台设置构造成官方内核的翻译引擎设置对象。"""
+    from pdf2zh_next.config.translate_engine_model import (
+        TRANSLATION_ENGINE_METADATA_MAP,
+    )
+
+    engine = _norm_engine(settings.get("engine") or "Ollama")
+    meta = TRANSLATION_ENGINE_METADATA_MAP.get(engine)
+    if meta is None:
+        raise ValueError(f"不支持的翻译服务: {settings.get('engine')}")
+    known = meta.setting_model_type.model_fields
+    kwargs: dict = {}
+    for key, value in (settings.get("engine_fields") or {}).items():
+        if key not in known or key in ("translate_engine_type", "support_llm"):
+            continue
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue  # 留空 = 用官方默认值
+        if isinstance(value, str):
+            value = value.strip()
+        value = _coerce_field_value(known[key].annotation, value)
+        if value is None:
+            continue
+        kwargs[key] = value
+    return meta.setting_model_type(**kwargs)
+
+
+def display_model(settings: dict) -> str:
+    """任务卡片上展示的引擎标识:优先取 *_model 字段,否则用服务中文名。"""
+    engine = _norm_engine(settings.get("engine") or "Ollama")
+    fields = settings.get("engine_fields") or {}
+    model = fields.get(f"{engine.lower()}_model") or ""
+    if model:
+        return str(model)
+    return SERVICE_META.get(engine, {}).get("label", engine)
+
+
+def _engine_supports_llm(engine_type: str) -> bool:
+    from pdf2zh_next.config.translate_engine_model import (
+        TRANSLATION_ENGINE_METADATA_MAP,
+    )
+
+    meta = TRANSLATION_ENGINE_METADATA_MAP.get(engine_type)
+    return bool(meta and meta.support_llm)
+
 
 # 对齐 tencent/Hy-MT2 官方支持的语言表(33 语种 + 繁体/粤语等变体,共 38 条)
 LANGS: dict[str, str] = {
@@ -132,19 +350,49 @@ def public_task(entry: dict) -> dict:
 
 def load_settings() -> dict:
     data = dict(DEFAULT_SETTINGS)
+    data["engine_fields"] = dict(DEFAULT_SETTINGS["engine_fields"])
     if SETTINGS_FILE.exists():
         try:
-            data.update(json.loads(SETTINGS_FILE.read_text(encoding="utf-8")))
+            saved = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
         except Exception:
-            pass
+            saved = {}
+        for key in ("engine", "lang_in", "lang_out"):
+            if saved.get(key):
+                data[key] = saved[key]
+        if "auto_extract_glossary" in saved:
+            data["auto_extract_glossary"] = bool(saved["auto_extract_glossary"])
+        if isinstance(saved.get("engine_fields"), dict):
+            data["engine_fields"].update(
+                {
+                    k: v
+                    for k, v in saved["engine_fields"].items()
+                    if v is not None and (not isinstance(v, str) or v.strip())
+                }
+            )
+        elif saved:
+            # 旧版扁平结构(ollama_model/ollama_host 在顶层)迁移
+            for legacy in ("ollama_model", "ollama_host"):
+                if saved.get(legacy):
+                    data["engine_fields"][legacy] = saved[legacy]
+    data["engine"] = _norm_engine(data.get("engine", "Ollama"))
     return data
 
 
 def save_settings(settings: dict) -> dict:
-    merged = dict(DEFAULT_SETTINGS)
-    for key in DEFAULT_SETTINGS:
-        if key in settings:
+    merged = load_settings()
+    for key in ("engine", "lang_in", "lang_out"):
+        if settings.get(key):
             merged[key] = settings[key]
+    if "auto_extract_glossary" in settings:
+        merged["auto_extract_glossary"] = bool(settings["auto_extract_glossary"])
+    if isinstance(settings.get("engine_fields"), dict):
+        for key, value in settings["engine_fields"].items():
+            # 空值 = 删除该字段(界面清空 key 保存即清除,留空项走官方默认值)
+            if value is None or (isinstance(value, str) and not value.strip()):
+                merged["engine_fields"].pop(key, None)
+            else:
+                merged["engine_fields"][key] = value
+    merged["engine"] = _norm_engine(merged.get("engine", "Ollama"))
     LIBRARY_ROOT.mkdir(parents=True, exist_ok=True)
     SETTINGS_FILE.write_text(
         json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -417,12 +665,18 @@ def pdf_info(rel: str) -> dict:
         doc.close()
 
 
+def page_cache_bucket(src: Path) -> Path:
+    """页面渲染缓存按源文件路径分桶,删除文件时可整桶清理。"""
+    return PAGE_CACHE_DIR / hashlib.sha1(str(src).encode()).hexdigest()[:16]
+
+
 def render_page(rel: str, page_no: int, zoom: float = 2.0) -> bytes:
     src = _resolve(rel)
+    bucket = page_cache_bucket(src)
     key = hashlib.sha1(
-        f"{src}|{src.stat().st_mtime_ns}|{page_no}|{zoom}".encode()
+        f"{src.stat().st_mtime_ns}|{page_no}|{zoom}".encode()
     ).hexdigest()[:24]
-    cache = PAGE_CACHE_DIR / f"{key}.png"
+    cache = bucket / f"{key}.png"
     if cache.exists():
         return cache.read_bytes()
     doc = pymupdf.open(src)
@@ -432,7 +686,7 @@ def render_page(rel: str, page_no: int, zoom: float = 2.0) -> bytes:
         data = pix.tobytes("png")
     finally:
         doc.close()
-    PAGE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    bucket.mkdir(parents=True, exist_ok=True)
     cache.write_bytes(data)
     return data
 
@@ -471,7 +725,7 @@ def start_translation(pdf_path: Path, settings: dict) -> str:
         "dual": None,
         "error": None,
         "started": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "model": settings.get("ollama_model", ""),
+        "model": display_model(settings),
     }
     TASKS[task_id] = entry
     BUS.publish({"type": "task_update", "task": public_task(entry)})
@@ -503,23 +757,25 @@ async def _run(task_id: str, pdf_path: Path, settings: dict) -> None:
 
     try:
         from pdf2zh_next.config.model import SettingsModel
-        from pdf2zh_next.config.translate_engine_model import OllamaSettings
         from pdf2zh_next.high_level import do_translate_async_stream
 
         out_dir = LIBRARY_ROOT / f"webapp-{datetime.now():%Y%m%d-%H%M%S}-{task_id}"
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        # translate_engine_settings 是必填字段,必须在构造时提供
-        engine_settings = OllamaSettings(
-            ollama_model=settings.get("ollama_model", DEFAULT_SETTINGS["ollama_model"]),
-            ollama_host=settings.get("ollama_host", DEFAULT_SETTINGS["ollama_host"]),
-        )
+        # 按所选服务构造官方引擎设置(支持全部 translate_engine_type)
+        engine_settings = build_engine_settings(settings)
         sm = SettingsModel(translate_engine_settings=engine_settings)
         sm.basic.input_files = {str(pdf_path)}
         sm.translation.lang_in = settings.get("lang_in", "en")
         sm.translation.lang_out = settings.get("lang_out", "zh")
         sm.translation.output = str(out_dir)
         sm.pdf.watermark_output_mode = "no_watermark"  # 商用交付:关闭 BabelDOC 水印行
+        # 自动术语表提取:仅 LLM 引擎可开;非 LLM 引擎内核已强制关闭,勿覆盖
+        engine_type = engine_settings.model_fields["translate_engine_type"].default
+        supports_llm = _engine_supports_llm(engine_type)
+        sm.translation.no_auto_extract_glossary = not (
+            supports_llm and bool(settings.get("auto_extract_glossary", False))
+        )
 
         entry["stage"] = "启动翻译内核"
         publish_changed()
@@ -613,11 +869,71 @@ def ensure_all_exports() -> int:
     return n
 
 
+# 对照/提取视图缓存的固定后缀(history_tab._cache_path 生成)
+DERIVED_VIEW_SUFFIXES = (".左原文右译文", ".仅译文", ".仅原文")
+
+
+def purge_derived_cache(sources: list[Path]) -> None:
+    """删除文件后,同步清掉 _sidecache 里它的派生视图与页面渲染缓存。"""
+    names: set[str] = set()
+    buckets: list[Path] = []
+    for src in sources:
+        for suffix in DERIVED_VIEW_SUFFIXES:
+            names.add(f"{src.stem}{suffix}.pdf")
+        buckets.append(page_cache_bucket(src))
+    if CACHE_DIR.exists():
+        for f in CACHE_DIR.iterdir():
+            if f.is_file() and f.name in names:
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+    for b in buckets:
+        shutil.rmtree(b, ignore_errors=True)
+
+
+def purge_orphan_cache() -> None:
+    """启动清理:旧版平铺布局的页面渲染缓存,以及源文件已不存在的派生视图。
+
+    前者是一次性迁移(新版 render_page 已按源文件分桶);
+    后者兜底历史遗留——delete_entries 只能清"删文件时"的缓存,
+    文件先于本机制被删掉的缓存要靠这里扫掉。
+    """
+    if not CACHE_DIR.exists():
+        return
+    if PAGE_CACHE_DIR.exists():
+        for f in PAGE_CACHE_DIR.iterdir():
+            if f.is_file() and f.suffix == ".png":
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+    live_stems = {
+        p.stem for p in LIBRARY_ROOT.rglob("*.pdf") if CACHE_DIR not in p.parents
+    }
+    for f in CACHE_DIR.iterdir():
+        if not f.is_file() or not f.name.endswith(".pdf"):
+            continue
+        stem = f.name[:-4]
+        for suffix in DERIVED_VIEW_SUFFIXES:
+            if stem.endswith(suffix):
+                stem = stem[: -len(suffix)]
+                break
+        else:
+            continue
+        if stem not in live_stems:
+            try:
+                f.unlink()
+            except OSError:
+                pass
+
+
 def delete_entries(paths: list[str], job_ids: list[str]) -> int:
     """删除库内文件与登记表条目,返回成功删除的文件数。"""
     n = 0
     parent_dirs: set[Path] = set()
     deleted: set[str] = set()
+    sources: list[Path] = []
     # 删除成品文件夹中同名导出件
     for jid in job_ids:
         for j in JOBS:
@@ -635,9 +951,11 @@ def delete_entries(paths: list[str], job_ids: list[str]) -> int:
             parent_dirs.add(p.parent)
             p.unlink()
             deleted.add(str(p.relative_to(LIBRARY_ROOT)))
+            sources.append(p)
             n += 1
         except Exception:
             pass
+    purge_derived_cache(sources)
     for jid in job_ids:
         JOBS[:] = [j for j in JOBS if j["id"] != jid]
     # 清空指向已删文件的产物指针,避免卡片残留失效路径

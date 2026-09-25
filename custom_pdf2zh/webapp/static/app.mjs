@@ -8,6 +8,10 @@ const shortModel = (m) => (m || "").includes("/") ? m.split("/").pop() : (m || "
 const state = {
   settings: {},
   langs: {},
+  services: [],
+  serviceGroups: {},
+  draftFields: {},
+  ollamaModels: [],
   tasks: [],
   activeTask: null,
   currentTaskId: null,
@@ -21,6 +25,17 @@ const state = {
 // ---------------------------------------------------------------------------
 // 基础工具
 // ---------------------------------------------------------------------------
+
+/* 视图代际:切换视图的操作(startTranslate/openTask/resetActiveView)都会递增,
+   在途的异步渲染醒来后发现代际已变就丢弃,防止旧内容"残影"回填。 */
+let viewSeq = 0;
+
+/* 单个容器的渲染代际:清空或发起新渲染时递增,旧的 renderPdfList 自动作废。 */
+function nextRenderGen(container) {
+  const gen = (Number(container.dataset.renderGen) || 0) + 1;
+  container.dataset.renderGen = String(gen);
+  return gen;
+}
 
 async function fetchJSON(url, opts) {
   const r = await fetch(url, opts);
@@ -44,13 +59,18 @@ function toast(text, ms = 1800) {
 // ---------------------------------------------------------------------------
 
 async function initSettings() {
-  const [settings, langs, models] = await Promise.all([
+  const [settings, langs, services, models] = await Promise.all([
     fetchJSON("/api/settings"),
     fetchJSON("/api/langs"),
-    fetchJSON("/api/ollama-models"),
+    fetchJSON("/api/services").catch(() => ({ services: [], groups: {} })),
+    fetchJSON("/api/ollama-models").catch(() => ({ models: [] })),
   ]);
   state.settings = settings;
   state.langs = langs;
+  state.services = services.services || [];
+  state.serviceGroups = services.groups || {};
+  state.draftFields = { ...(settings.engine_fields || {}) };
+  state.ollamaModels = models.models || [];
 
   for (const [id, val, withAuto] of [
     ["sourceLanguage", settings.lang_in, true],
@@ -73,53 +93,152 @@ async function initSettings() {
     sel.value = val;
   }
 
-  const modelEl = $("ollamaModel");
-  const saved = settings.ollama_model;
-  const norm = (s) => s.replace(/:latest$/i, "");
-  if (models.models.length) {
-    if (modelEl.tagName === "SELECT") {
-      modelEl.innerHTML = "";
-      for (const m of models.models) {
+  $("autoExtractGlossary").checked = !!settings.auto_extract_glossary;
+
+  renderEngineSelect();
+  renderEngineFields();
+  updateServicePill();
+}
+
+function renderEngineSelect() {
+  const sel = $("engine");
+  sel.innerHTML = "";
+  const byGroup = {};
+  for (const s of state.services) (byGroup[s.group] ??= []).push(s);
+  const order = ["free", "local", "llm", "trad"];
+  for (const g of order) {
+    if (!byGroup[g]?.length) continue;
+    const og = document.createElement("optgroup");
+    og.label = state.serviceGroups[g] || g;
+    for (const s of byGroup[g]) {
+      const o = document.createElement("option");
+      o.value = s.type;
+      o.textContent = s.label;
+      og.append(o);
+    }
+    sel.append(og);
+  }
+  // 后端返回的服务里找不到已存引擎时(内核降级等),兜底加一项
+  if (!state.services.some((s) => s.type === sel.value || s.type === state.settings.engine)) {
+    const saved = state.settings.engine;
+    if (saved) {
+      const o = document.createElement("option");
+      o.value = saved;
+      o.textContent = saved;
+      sel.append(o);
+    }
+  }
+  sel.value = state.settings.engine || "Ollama";
+  sel.onchange = () => {
+    mergeDraftFromDom();
+    renderEngineFields();
+    updateServicePill();
+    if (sel.value === "Ollama") refreshOllamaModels();
+  };
+}
+
+function renderEngineFields() {
+  const box = $("engine-fields");
+  box.innerHTML = "";
+  const svc = state.services.find((s) => s.type === $("engine").value);
+  if (!svc) return;
+  if (!svc.fields.length) {
+    const hint = document.createElement("p");
+    hint.className = "field-hint";
+    hint.textContent = "该服务无需额外配置，选好后直接开始翻译。";
+    box.append(hint);
+    return;
+  }
+  for (const f of svc.fields) {
+    const label = document.createElement("label");
+    const span = document.createElement("span");
+    span.textContent = f.label;
+    const input = document.createElement("input");
+    input.dataset.field = f.name;
+    input.value = state.draftFields[f.name] ?? "";
+    input.placeholder = f.default || (f.secret ? "sk-…" : "");
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    if (f.secret) input.type = "password";
+    // Ollama 模型:本地模型列表可用时渲染真下拉,连不上才回退手填
+    if (svc.type === "Ollama" && f.name === "ollama_model" && state.ollamaModels.length) {
+      const norm = (s) => String(s).replace(/:latest$/i, "");
+      const cur = state.draftFields[f.name] ?? "";
+      const sel = document.createElement("select");
+      sel.dataset.field = f.name;
+      for (const m of state.ollamaModels) {
         const o = document.createElement("option");
         o.value = m;
         o.textContent = m;
-        modelEl.append(o);
+        sel.append(o);
       }
-      if (!models.models.some((m) => norm(m) === norm(saved))) {
+      const match = cur && state.ollamaModels.find((m) => norm(m) === norm(cur));
+      if (cur && !match) {
         const o = document.createElement("option");
-        o.value = saved;
-        o.textContent = saved;
-        modelEl.append(o);
+        o.value = cur;
+        o.textContent = cur;
+        sel.append(o);
       }
+      sel.value = match || cur || state.ollamaModels[0];
+      label.append(span, sel);
+      box.append(label);
+      continue;
     }
-    // 选中与列表规范化匹配的那一项
-    const match = models.models.find((m) => norm(m) === norm(saved));
-    modelEl.value = match || saved;
-  } else if (modelEl.tagName === "SELECT") {
-    const input = document.createElement("input");
-    input.id = "ollamaModel";
-    input.value = saved;
-    modelEl.replaceWith(input);
+    label.append(span, input);
+    box.append(label);
   }
-  $("ollamaHost").value = settings.ollama_host;
+}
 
-  const pill = $("settings-state");
-  if (models.models.length) {
-    pill.textContent = `Ollama 已连接 · ${models.models.length} 个模型`;
-    pill.classList.add("ok");
-  } else {
-    pill.textContent = "Ollama 未连接(可手填模型)";
-    pill.classList.remove("ok");
+/* Ollama 服务下异步刷新本地模型列表,拿到了就重渲染成下拉 */
+function refreshOllamaModels() {
+  fetchJSON("/api/ollama-models")
+    .then((m) => {
+      const list = m.models || [];
+      if (!list.length || $("engine").value !== "Ollama") return;
+      if (list.join("|") === state.ollamaModels.join("|")) return;
+      state.ollamaModels = list;
+      mergeDraftFromDom();
+      renderEngineFields();
+    })
+    .catch(() => {});
+}
+
+/* 服务切换前,把当前表单里已输入的值收进草稿,避免切回来丢失 */
+function mergeDraftFromDom() {
+  for (const el of $("engine-fields").querySelectorAll("input[data-field], select[data-field]")) {
+    const v = el.value.trim();
+    if (v) state.draftFields[el.dataset.field] = v;
+    else delete state.draftFields[el.dataset.field];
   }
+}
+
+function collectEngineFields() {
+  mergeDraftFromDom();
+  return { ...state.draftFields };
+}
+
+function updateServicePill() {
+  const pill = $("settings-state");
+  const svc = state.services.find((s) => s.type === $("engine").value);
+  pill.textContent = svc ? svc.label : "引擎检测中…";
+  pill.classList.add("ok");
+}
+
+/* 与后端 display_model 对齐:任务卡片/翻译中标题上展示的引擎标识 */
+function displayModelName(engine, fields) {
+  const flag = String(engine || "Ollama").toLowerCase();
+  const model = fields?.[`${flag}_model`] || "";
+  if (model) return String(model);
+  return state.services.find((s) => s.type === engine)?.label || engine || "";
 }
 
 function currentSettings() {
   return {
     engine: $("engine").value,
-    ollama_model: $("ollamaModel").value,
-    ollama_host: $("ollamaHost").value.trim() || "http://localhost:11434",
+    engine_fields: collectEngineFields(),
     lang_in: $("sourceLanguage").value,
     lang_out: $("targetLanguage").value,
+    auto_extract_glossary: $("autoExtractGlossary").checked,
   };
 }
 
@@ -129,7 +248,32 @@ async function saveSettings() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(currentSettings()),
   });
+  state.draftFields = { ...(state.settings.engine_fields || {}) };
   toast("设置已保存");
+}
+
+/* 关闭服务:有任务在跑先提示;关闭成功后冻结页面,提示用户关闭标签页 */
+async function shutdownService() {
+  const running = state.tasks.filter((t) => t.running).length;
+  let force = false;
+  if (running > 0) {
+    if (!confirm(`有 ${running} 个任务正在运行，关闭服务会中断它们（已完成的任务不受影响）。\n确定关闭服务？`)) return;
+    force = true;
+  } else if (!confirm("确定关闭翻译服务？\n关闭后本页面无法继续操作；下次使用请重新运行 start_workbench.bat。")) return;
+  const res = await fetchJSON("/api/shutdown", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ force }),
+  }).catch((e) => ({ ok: false, message: e.message }));
+  if (!res.ok) {
+    toast(res.message || "关闭失败", 4000);
+    return;
+  }
+  toast("服务已关闭", 5000);
+  $("status").textContent = "服务已关闭，可关闭本页面";
+  $("settings-state").textContent = "已关闭";
+  $("settings-state").classList.remove("ok");
+  document.querySelectorAll("button").forEach((b) => (b.disabled = true));
 }
 
 // ---------------------------------------------------------------------------
@@ -220,7 +364,9 @@ function renderTaskList() {
 // ---------------------------------------------------------------------------
 
 async function renderPdfList(container, relPath) {
+  const gen = nextRenderGen(container);
   const info = await fetchJSON(`/api/pdf-info?file=${encodeURIComponent(relPath)}`);
+  if (container.dataset.renderGen !== String(gen)) return; // 已被更新的渲染/清空取代
   container.innerHTML = "";
   const frag = document.createDocumentFragment();
   for (let i = 1; i <= info.pages; i++) {
@@ -245,6 +391,7 @@ async function renderPdfList(container, relPath) {
     page.append(img, num);
     frag.append(page);
   }
+  if (container.dataset.renderGen !== String(gen)) return; // append 前最后一道闸
   container.append(frag);
 }
 
@@ -295,9 +442,10 @@ function bindSyncScroll(a, b) {
 // ---------------------------------------------------------------------------
 
 async function openTask(entry) {
+  const seq = ++viewSeq;
   state.activeTask = entry;
   renderTaskList();
-  $("active-model-name").textContent = shortModel(entry.model || state.settings.ollama_model || "");
+  $("active-model-name").textContent = shortModel(entry.model || "");
 
   $("source-title").textContent = entry.name;
   $("result-title").textContent = entry.translated ? "已生成" : "尚未翻译";
@@ -311,10 +459,12 @@ async function openTask(entry) {
         body: JSON.stringify({ path: entry.dual, which: "原文" }),
       })).path;
     }
+    if (seq !== viewSeq) return; // 期间用户切换了视图,本次作废
     if (srcRel) {
       $("source-empty").hidden = true;
       $("source-preview").hidden = false;
       await renderPdfList($("source-preview"), srcRel);
+      if (seq !== viewSeq) return;
       $("source-meta").textContent = "PDF · 原文";
     }
   } catch (e) {
@@ -330,9 +480,11 @@ async function openTask(entry) {
         body: JSON.stringify({ path: entry.dual, which: "译文" }),
       })).path;
     }
+    if (seq !== viewSeq) return; // 期间用户切换了视图,本次作废
     if (outRel) {
       showResultView("translation");
       await renderPdfList($("translated-preview"), outRel);
+      if (seq !== viewSeq) return;
       $("result-empty").hidden = true;
       $("translated-preview").hidden = false;
     } else {
@@ -344,6 +496,7 @@ async function openTask(entry) {
     appendLog(`译文预览失败: ${e.message}`);
   }
 
+  if (seq !== viewSeq) return;
   $("open-mono").disabled = !(entry.mono || entry.dual);
   $("open-dual").disabled = !entry.dual;
   $("open-alt").disabled = !entry.dual;
@@ -385,19 +538,26 @@ async function handleFiles(fileList) {
 }
 
 async function startTranslate(relPath, name) {
+  const seq = ++viewSeq;
   const body = { path: relPath, ...currentSettings() };
   const res = await fetchJSON("/api/translate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+  if (seq !== viewSeq) return; // 等待期间用户切换了视图,UI 交由最新操作接管
   state.currentTaskId = res.task_id;
   $("source-title").textContent = name;
   $("result-title").textContent = "翻译中…";
-  $("active-model-name").textContent = shortModel(body.ollama_model);
+  $("active-model-name").textContent = shortModel(displayModelName(body.engine, body.engine_fields));
+  const tp = $("translated-preview");
+  nextRenderGen(tp); // 作废在途的预览渲染,防止旧内容回填成残影
+  tp.innerHTML = "";
+  tp.hidden = true;
+  state.logLines = []; // 新任务日志从零开始,不混入上一轮
+  $("log").textContent = "";
+  state.lastLogSig = null;
   $("result-empty").hidden = true;
-  $("translated-preview").hidden = true;
-  $("translated-preview").innerHTML = "";
   showProgress({ name, stage: "准备中", progress: 0, detail: "" });
   showResultView("log");
   $("source-empty").hidden = true;
@@ -411,6 +571,27 @@ async function retranslate(entry) {
   await startTranslate(entry.original, entry.name);
 }
 
+function resetActiveView() {
+  ++viewSeq;
+  nextRenderGen($("source-preview"));
+  nextRenderGen($("translated-preview"));
+  state.activeTask = null;
+  $("source-title").textContent = "等待上传文档";
+  $("source-meta").textContent = "PDF · 本地预览";
+  $("source-preview").hidden = true;
+  $("source-preview").innerHTML = "";
+  $("source-empty").hidden = false;
+  $("result-title").textContent = "等待任务";
+  $("translated-preview").innerHTML = "";
+  $("translated-preview").hidden = true;
+  $("result-empty").hidden = false;
+  document.querySelectorAll(".result-actions button").forEach((b) => (b.disabled = true));
+  state.logLines = [];
+  $("log").textContent = "";
+  $("log").hidden = true;
+  showResultView("translation");
+}
+
 async function deleteTask(entry) {
   const paths = [entry.original, entry.mono, entry.dual].filter(Boolean);
   if (!confirm(`删除「${entry.name}」的历史记录和输出文件？`)) return;
@@ -419,19 +600,7 @@ async function deleteTask(entry) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ paths, job_ids: entry.id ? [entry.id] : [] }),
   });
-  if (state.activeTask && state.activeTask.id === entry.id) {
-    state.activeTask = null;
-    $("source-title").textContent = "等待上传文档";
-    $("source-meta").textContent = "PDF · 本地预览";
-    $("source-preview").hidden = true;
-    $("source-preview").innerHTML = "";
-    $("source-empty").hidden = false;
-    $("result-title").textContent = "等待任务";
-    $("translated-preview").innerHTML = "";
-    $("translated-preview").hidden = true;
-    $("result-empty").hidden = false;
-    document.querySelectorAll(".result-actions button").forEach((b) => (b.disabled = true));
-  }
+  if (state.activeTask && state.activeTask.id === entry.id) resetActiveView();
   toast("已删除");
   refreshTasks(true);
 }
@@ -447,6 +616,7 @@ async function clearAll() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ paths, job_ids: jobIds }),
   });
+  resetActiveView();
   toast("已清空");
   refreshTasks(true);
 }
@@ -479,8 +649,10 @@ function appendLog(line) {
   state.logLines.push(`[${stamp}] ${line}`);
   if (state.logLines.length > 500) state.logLines.shift();
   const el = $("log");
+  // 用户上翻查看历史时不强制拽回底部;贴近底部(40px 内)才跟随滚动
+  const stick = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
   el.textContent = state.logLines.join("\n");
-  el.scrollTop = el.scrollHeight;
+  if (stick) el.scrollTop = el.scrollHeight;
 }
 
 function showResultView(view) {
@@ -569,6 +741,7 @@ function bindUI() {
   $("save-settings").onclick = saveSettings;
   $("open-output").onclick = () => fetchJSON("/api/open-library", { method: "POST" });
   $("clear-history").onclick = clearAll;
+  $("shutdown-service").onclick = shutdownService;
   $("task-search").oninput = (e) => { state.search = e.target.value.trim(); renderTaskList(); };
   document.querySelectorAll(".task-tab").forEach((b) => {
     b.onclick = () => {
