@@ -168,15 +168,15 @@ function renderEngineFields() {
       sel.dataset.field = f.name;
       for (const m of state.ollamaModels) {
         const o = document.createElement("option");
-        o.value = m;
-        o.textContent = m;
+        o.value = m; // 存全名:Ollama 解析模型需要完整命名空间名
+        o.textContent = shortModel(m); // 显示短名,不带命名空间前缀
         sel.append(o);
       }
       const match = cur && state.ollamaModels.find((m) => norm(m) === norm(cur));
       if (cur && !match) {
         const o = document.createElement("option");
         o.value = cur;
-        o.textContent = cur;
+        o.textContent = shortModel(cur);
         sel.append(o);
       }
       sel.value = match || cur || state.ollamaModels[0];
