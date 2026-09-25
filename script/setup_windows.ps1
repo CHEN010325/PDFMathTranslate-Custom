@@ -81,26 +81,45 @@ if (-not (Test-Path (Join-Path $venv "Scripts\python.exe"))) {
     if ($LASTEXITCODE -ne 0) { Fail "venv 创建失败。" }
 }
 $vp = Join-Path $venv "Scripts\python.exe"
-# pip 源: 默认走清华 TUNA 国内镜像 —— 客户机多在国内, pypi.org 直连只有
-# 1-2MB/s; 国内镜像通常 5-20MB/s。海外部署设环境变量覆盖, 例如恢复官方源:
-#   set PDF2ZH_PIP_INDEX=https://pypi.org/simple
-$pipIndex = if ($env:PDF2ZH_PIP_INDEX) { $env:PDF2ZH_PIP_INDEX } else { "https://pypi.tuna.tsinghua.edu.cn/simple" }
-Log "pip 源: $pipIndex"
-Log "升级 pip ..."
-& $vp -m pip install --upgrade pip -i $pipIndex
-if ($LASTEXITCODE -ne 0) { Fail "pip 升级失败, 请检查网络后重新运行。" }
-# 分两步装: pdf2zh-next 2.9.0 的依赖声明与 babeldoc>=0.6.4 冲突, 无法一次性解析;
-# 与本机验证过的环境一致——先装引擎, 再独立升级 babeldoc(pip 会警告依赖冲突, 属预期)。
-# 不加 -q: 保留 pip 进度条, 客户机网慢时窗口长期无输出会被误认为卡死。
-Log "安装 pdf2zh-next==2.9.0 及全部依赖 (下载约 0.5GB, 国内镜像一般 1-3 分钟) ..."
-& $vp -m pip install "pdf2zh-next==2.9.0" -i $pipIndex
-if ($LASTEXITCODE -ne 0) { Fail "pdf2zh-next 安装失败, 请检查网络后重新运行。" }
-Log "pdf2zh-next 安装完成"
-Log "安装 babeldoc==0.6.4 (排版内核) ..."
-& $vp -m pip install "babeldoc==0.6.4" -i $pipIndex
-if ($LASTEXITCODE -ne 0) { Fail "babeldoc 升级失败, 请检查网络后重新运行。" }
-$pkgver = (& $vp -m pip show pdf2zh-next | Select-String "^Version").ToString()
-Log "引擎安装完成: $pkgver"
+# pip 源: 默认清华 TUNA —— 客户机多在国内, pypi.org 直连只有 1-2MB/s;
+# 失败自动回退 阿里云 -> 官方源。海外部署设环境变量 PDF2ZH_PIP_INDEX 覆盖,
+# 例如恢复官方源: set PDF2ZH_PIP_INDEX=https://pypi.org/simple
+$mirrors = @(
+    $env:PDF2ZH_PIP_INDEX,
+    "https://pypi.tuna.tsinghua.edu.cn/simple",
+    "https://mirrors.aliyun.com/pypi/simple/",
+    "https://pypi.org/simple"
+) | Where-Object { $_ }
+
+function Install-PipPackage($spec, $desc) {
+    foreach ($m in $mirrors) {
+        Log "安装 $desc (源: $m) ..."
+        & $vp -m pip install $spec -i $m
+        if ($LASTEXITCODE -eq 0) { Log "$desc 安装完成"; return }
+        Log "源 $m 失败, 自动尝试下一个 ..."
+    }
+    Fail "$desc 安装失败(所有 pip 源均失败), 请检查网络后重新运行。"
+}
+
+# 幂等保护: 引擎已装好就整段跳过。重跑时若带着"pdf2zh-next 要 pymupdf<1.25.3
+# 而 babeldoc 已把 pymupdf 升级"的已知冲突再执行 pip install, 解析器会试图
+# 降级 pymupdf 修复冲突, 白白下载还可能因镜像 403 而中断
+$haveEngine = (& $vp -m pip show pdf2zh-next 2>$null | Select-String "^Version: 2.9.0")
+$haveBabel = (& $vp -m pip show babeldoc 2>$null | Select-String "^Version: 0.6.4")
+if ($haveEngine -and $haveBabel) {
+    Log "pdf2zh-next 2.9.0 与 babeldoc 0.6.4 均已安装, 跳过引擎安装"
+} else {
+    Log "升级 pip (源: $($mirrors[0])) ..."
+    & $vp -m pip install --upgrade pip -i $mirrors[0]
+    if ($LASTEXITCODE -ne 0) { Log "[提示] pip 升级失败, 不阻塞, 用 venv 自带 pip 继续" }
+    # 分两步装: pdf2zh-next 2.9.0 的依赖声明与 babeldoc>=0.6.4 冲突, 无法一次性解析;
+    # 与本机验证过的环境一致——先装引擎, 再独立升级 babeldoc(pip 会警告依赖冲突, 属预期)。
+    # 不加 -q: 保留 pip 进度条, 客户机网慢时窗口长期无输出会被误认为卡死。
+    Install-PipPackage "pdf2zh-next==2.9.0" "pdf2zh-next==2.9.0 及全部依赖 (下载约 0.5GB, 国内镜像一般 1-3 分钟)"
+    Install-PipPackage "babeldoc==0.6.4" "babeldoc==0.6.4 (排版内核)"
+    $pkgver = (& $vp -m pip show pdf2zh-next | Select-String "^Version").ToString()
+    Log "引擎安装完成: $pkgver"
+}
 
 # ---- 4. 补丁 ----
 Write-Host "[4/6] 应用定制补丁 (Ollama 修复 / 历史页签) ..."
