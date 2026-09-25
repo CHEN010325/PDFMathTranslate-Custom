@@ -217,14 +217,24 @@ if ($skipShortcut) {
     Write-Host "      按要求跳过桌面快捷方式。"
 } else {
     try {
-        $desktop = [Environment]::GetFolderPath("Desktop")
+        # 真实桌面路径: 走 Explorer 的 Shell 接口 —— [Environment]::GetFolderPath
+        # 在 OneDrive 重定向/桌面整理工具接管的环境下可能给出用户看不到的目录
+        try {
+            $desktop = (New-Object -ComObject Shell.Application).NameSpace(0).Self.Path
+        } catch {
+            $desktop = [Environment]::GetFolderPath("Desktop")
+        }
         $shell = New-Object -ComObject WScript.Shell
         $lnk = $shell.CreateShortcut((Join-Path $desktop "PDF翻译工作台.lnk"))
         $lnk.TargetPath = $hiddenLauncher
         $lnk.WorkingDirectory = $repo
         $lnk.IconLocation = Join-Path $kernel ".venv\Scripts\python.exe,0"
         $lnk.Save()
-        Log "桌面快捷方式已创建: $([IO.Path]::Combine($desktop, 'PDF翻译工作台.lnk'))"
+        if (Test-Path (Join-Path $desktop "PDF翻译工作台.lnk")) {
+            Log "桌面快捷方式已创建: $([IO.Path]::Combine($desktop, 'PDF翻译工作台.lnk'))"
+        } else {
+            Log "[警告] 快捷方式创建后未找到文件, 桌面路径: $desktop"
+        }
     } catch {
         Write-Host "      [警告] 快捷方式创建失败, 可直接运行 start_workbench.bat" -ForegroundColor Yellow
     }
