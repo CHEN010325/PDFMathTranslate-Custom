@@ -5,6 +5,26 @@ This repository carries local customizations on top of
 Rebase this branch onto `upstream/main` after pulling updates, then re-check
 the items below (upstream changes may conflict or make a patch obsolete).
 
+## 2026-09-25 — 修复:前端启动 ReferenceError("引擎检测中"真根因)
+
+- **根因**:fb7b81e 给 initSettings 加 try/catch 时,把 fetch 解构出的
+  `settings`/`langs` 留在 try 块内,块外的语言下拉渲染循环仍引用这两个
+  块级变量 → 每次启动必然 `ReferenceError: settings is not defined`,
+  main() 无 catch,错误静默吞掉,下拉永不填充、pill 永远停在初始占位
+  "引擎检测中…"。后端一切正常(curl 全 200),纯前端作用域 bug;
+  开发机同样中招(当时未刷新页面未察觉)。
+- **修复**:渲染段改用 `state.settings`/`state.langs`;main() 捕获启动
+  异常,状态栏显示"启动失败: 原因"不再静默;index.html 脚本版本
+  v=4 → v=5。客户机用同方案实测通过(pill 显示"Ollama（本地）",
+  引擎 23 项、语言 39 项)。
+- **同轮附带**:静态服务对 .js/.mjs 强制 `text/javascript` MIME(3e62a73,
+  防 Windows 注册表变异导致 module 被拒执行,防御性保留);启动器改
+  %~dp0 相对路径可跨机器同步(86580bb);bat 注入 NO_PROXY 绕开客户机
+  死代理(a2743d9)。
+- **教训**:远程排障时后端 curl 全 200 而页面卡死,应第一时间索取
+  浏览器 F12 Console 截图等直接证据,而非用间接证据叠理论
+  (本次先后误判网络代理与 MIME,多绕了数轮)。
+
 ## 2026-09-25 — 修复:成品文件夹一次翻译出现三个 PDF
 
 - **现象**:一次翻译后 `_exports` 出现两份"纯译文"——干净命名的
