@@ -58,19 +58,40 @@ function toast(text, ms = 1800) {
 // 设置面板
 // ---------------------------------------------------------------------------
 
+async function fetchJSONRetry(url, attempts = 3) {
+  // 启动竞态兜底: 浏览器可能比服务先就绪, 关键请求失败自动重试,
+  // 避免页面静默卡死在"引擎检测中…"
+  for (let i = 1; ; i++) {
+    try {
+      return await fetchJSON(url);
+    } catch (e) {
+      if (i >= attempts) throw e;
+      await new Promise((r) => setTimeout(r, 1200 * i));
+    }
+  }
+}
+
 async function initSettings() {
-  const [settings, langs, services, models] = await Promise.all([
-    fetchJSON("/api/settings"),
-    fetchJSON("/api/langs"),
-    fetchJSON("/api/services").catch(() => ({ services: [], groups: {} })),
-    fetchJSON("/api/ollama-models").catch(() => ({ models: [] })),
-  ]);
-  state.settings = settings;
-  state.langs = langs;
-  state.services = services.services || [];
-  state.serviceGroups = services.groups || {};
-  state.draftFields = { ...(settings.engine_fields || {}) };
-  state.ollamaModels = models.models || [];
+  try {
+    const [settings, langs, services, models] = await Promise.all([
+      fetchJSONRetry("/api/settings"),
+      fetchJSONRetry("/api/langs"),
+      fetchJSONRetry("/api/services"),
+      fetchJSONRetry("/api/ollama-models").catch(() => ({ models: [] })),
+    ]);
+    state.settings = settings;
+    state.langs = langs;
+    state.services = services.services || [];
+    state.serviceGroups = services.groups || {};
+    state.draftFields = { ...(settings.engine_fields || {}) };
+    state.ollamaModels = models.models || [];
+  } catch (e) {
+    console.error("initSettings failed:", e);
+    const pill = $("settings-state");
+    pill.textContent = "设置加载失败,请刷新页面";
+    pill.classList.remove("ok");
+    throw e;
+  }
 
   for (const [id, val, withAuto] of [
     ["sourceLanguage", settings.lang_in, true],
