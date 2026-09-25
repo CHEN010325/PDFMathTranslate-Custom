@@ -5,6 +5,32 @@ This repository carries local customizations on top of
 Rebase this branch onto `upstream/main` after pulling updates, then re-check
 the items below (upstream changes may conflict or make a patch obsolete).
 
+## 2026-09-25 — 修复:成品文件夹一次翻译出现三个 PDF
+
+- **现象**:一次翻译后 `_exports` 出现两份"纯译文"——干净命名的
+  `<文档名>-纯译文.pdf` 之外多出一份 `<文档名>.no_watermark-纯译文.pdf`
+  (内容是内核收尾前 2 秒的中间版 mono,比最终版小 99 字节)。
+- **根因**:`server.py` 把 `ensure_all_exports()`(启动回填)放在模块
+  导入期执行。翻译收尾时若工作台被再次启动(双击图标/bat 等),新进程
+  会在 import 期间抢跑回填:`_rebuild_orphan_jobs` 扫描库目录,把**运行中
+  任务刚写进会话目录的半成品** `…no_watermark.zh.mono.pdf` 误登记为
+  "无主产物"(任务要等完成时才登记 mono/dual 路径),按该幽灵任务名导出;
+  随后新进程因 7860 端口被占而退出,只留下重复文件。dual 当时还没写出,
+  所以只多一份纯译文。
+- **修复(三层)**:
+  1. `server.py` 新增 `_acquire_single_instance_lock()`——独占锁定
+     `pdf2zh_files/_server.lock`(msvcrt/fcntl,句柄存模块级变量防 GC
+     释放),拿不到锁打印"已在运行"并顺手打开网页后退出;
+  2. `ensure_all_exports()`/`purge_orphan_cache()` 移到 `main()` 拿锁
+     之后,import 不再有副作用;
+  3. `engine.py` 的 `_rebuild_orphan_jobs`/`scan_library` 散件扫描跳过
+     10 分钟内新产出的 `webapp-*` 会话文件(进行中任务会自行登记),
+     恢复旧任务时剥掉名称里的 `.no_watermark` 中缀。
+- **验证**:小文件端到端翻译 → 成品文件夹恰好两件(纯译文+中英对照);
+  翻译中途再启动第二实例 → 打印"已在运行"立即退出,无任何多余导出。
+  另:venv 的 `python.exe` 是启动器,每个实例表现为"启动器+真实解释器
+  (Anaconda base)"两个 PID,属正常现象,排查时勿误判为双实例。
+
 ## 2026-09-25 — 从零重部署实测 + 预热误报修复 + 桌面图标静默启动
 
 - **全量删除后从零重部署实测通过**:按用户要求删除本地全部代码与资源

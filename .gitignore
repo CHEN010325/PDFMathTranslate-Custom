@@ -3,6 +3,10 @@
 pdf2zh/kernel/PDFMathTranslate-next.git/*.csv
 pdf2zh/kernel/PDFMathTranslate-next.git/*.pdf
 
+# 启动器由 script/setup_windows.ps1 部署时按机器路径生成,不入库
+start_workbench.bat
+start_workbench_hidden.vbs
+
 # PDF Files
 pdf2zh_files
 gui/pdf2zh_files

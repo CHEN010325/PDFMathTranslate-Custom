@@ -469,7 +469,12 @@ def _rebuild_orphan_jobs() -> None:
         mtime = max(
             (LIBRARY_ROOT / v).stat().st_mtime for v in g.values() if v
         )
+        # 刚生成的会话产物多半属于正在运行的任务(它完成时会自行登记),
+        # 此刻收编会把半成品当成无主产物,导出出带 .no_watermark 的重复件
+        if time.time() - mtime < 600:
+            continue
         name = re.sub(r"\.zh$", "", base, flags=re.IGNORECASE)
+        name = re.sub(r"\.no_watermark$", "", name, flags=re.IGNORECASE)
         # 尝试关联 _uploads 里的同名原件(登记表启用前完成的翻译)
         input_rel = None
         up = UPLOAD_DIR / f"{name}.pdf"
@@ -600,6 +605,12 @@ def scan_library() -> list[dict]:
     loose = sorted(groups.values(), key=lambda x: x["mtime"], reverse=True)
     for g in loose:
         translated = bool(g["mono"] or g["dual"])
+        if (
+            translated
+            and g["dir"].startswith("webapp-")
+            and time.time() - g["mtime"] < 600
+        ):
+            continue  # 进行中会话的半成品,等任务完成自行登记
         items.append(
             {
                 "id": None,

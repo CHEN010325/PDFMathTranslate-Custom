@@ -52,10 +52,10 @@ class NoCacheStaticFiles(StaticFiles):
 
 app.mount("/static", NoCacheStaticFiles(directory=STATIC_DIR), name="static")
 
-# 启动回填:历史已完成任务的成品补齐到成品文件夹
-engine.ensure_all_exports()
-# 启动清理:旧版平铺页面缓存 + 源文件已消失的派生视图缓存
-engine.purge_orphan_cache()
+# 启动回填/清理挪到 main()(拿到单实例锁之后)执行:
+# 若放在模块导入期,第二个实例被误启动时会在翻译进行中抢跑回填,
+# 把内核刚写出的会话半成品当"无主产物"导出成重复文件,再因端口
+# 被占而退出 —— 单实例锁保证回填只有一个进程会做。
 
 
 # ---------------------------------------------------------------------------
@@ -335,12 +335,49 @@ async def events(request: Request) -> EventSourceResponse:
 _server = None
 
 
+_lock_fp = None  # 持有锁文件句柄;局部变量会被 GC 关闭导致锁失效
+
+
+def _acquire_single_instance_lock() -> bool:
+    """单实例守卫:独占锁定 _server.lock,进程存活期间持有(崩溃由 OS 释放)。
+
+    不管用户从桌面图标、bat 还是别的入口再启动一个实例,拿不到锁的
+    都会立即退出,避免两个进程竞争 _jobs.json / 成品文件夹。
+    """
+    global _lock_fp
+    engine.LIBRARY_ROOT.mkdir(parents=True, exist_ok=True)
+    fp = open(engine.LIBRARY_ROOT / "_server.lock", "a+")
+    try:
+        fp.seek(0)
+        if sys.platform == "win32":
+            import msvcrt
+
+            msvcrt.locking(fp.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fp.close()
+        return False
+    _lock_fp = fp  # 进程存活期间保持引用,锁不释放
+    return True
+
+
 def main() -> None:
     global _server
     import uvicorn
 
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 7860
     url = f"http://127.0.0.1:{port}"
+    if not _acquire_single_instance_lock():
+        print(f"PDF 翻译工作台已在运行: {url}", flush=True)
+        webbrowser.open(url)
+        return
+    # 启动回填:历史已完成任务的成品补齐到成品文件夹
+    engine.ensure_all_exports()
+    # 启动清理:旧版平铺页面缓存 + 源文件已消失的派生视图缓存
+    engine.purge_orphan_cache()
     print(f"PDF 翻译工作台: {url}", flush=True)
     threading_timer(port, url)
     # SSE 是长连接,优雅停机最多等 3 秒就强制断开,保证"关闭服务"能退干净
