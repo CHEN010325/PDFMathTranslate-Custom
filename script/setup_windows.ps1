@@ -65,9 +65,10 @@ $vp = Join-Path $venv "Scripts\python.exe"
 & $vp -m pip install --upgrade pip -q
 # 分两步装: pdf2zh-next 2.9.0 的依赖声明与 babeldoc>=0.6.4 冲突, 无法一次性解析;
 # 与本机验证过的环境一致——先装引擎, 再独立升级 babeldoc(pip 会警告依赖冲突, 属预期)。
-& $vp -m pip install -q "pdf2zh-next==2.9.0"
+# 不加 -q: 保留 pip 进度条, 客户机网慢时窗口长期无输出会被误认为卡死。
+& $vp -m pip install "pdf2zh-next==2.9.0"
 if ($LASTEXITCODE -ne 0) { Fail "pdf2zh-next 安装失败, 请检查网络后重新运行。" }
-& $vp -m pip install -q "babeldoc==0.6.4"
+& $vp -m pip install "babeldoc==0.6.4"
 if ($LASTEXITCODE -ne 0) { Fail "babeldoc 升级失败, 请检查网络后重新运行。" }
 $pkgver = (& $vp -m pip show pdf2zh-next | Select-String "^Version").ToString()
 Write-Host "      已安装 $pkgver"
