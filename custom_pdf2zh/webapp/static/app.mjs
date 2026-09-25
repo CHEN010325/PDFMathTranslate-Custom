@@ -94,8 +94,8 @@ async function initSettings() {
   }
 
   for (const [id, val, withAuto] of [
-    ["sourceLanguage", settings.lang_in, true],
-    ["targetLanguage", settings.lang_out, false],
+    ["sourceLanguage", state.settings.lang_in, true],
+    ["targetLanguage", state.settings.lang_out, false],
   ]) {
     const sel = $(id);
     sel.innerHTML = "";
@@ -105,7 +105,7 @@ async function initSettings() {
       o.textContent = "自动检测";
       sel.append(o);
     }
-    for (const [code, label] of Object.entries(langs)) {
+    for (const [code, label] of Object.entries(state.langs)) {
       const o = document.createElement("option");
       o.value = code;
       o.textContent = label;
@@ -114,7 +114,7 @@ async function initSettings() {
     sel.value = val;
   }
 
-  $("autoExtractGlossary").checked = !!settings.auto_extract_glossary;
+  $("autoExtractGlossary").checked = !!state.settings.auto_extract_glossary;
 
   renderEngineSelect();
   renderEngineFields();
@@ -813,7 +813,14 @@ function bindUI() {
 
 async function main() {
   bindUI();
-  await initSettings();
+  try {
+    await initSettings();
+  } catch (e) {
+    // 不再静默: 启动失败原因直接显示在状态栏, 便于远程排查
+    $("status").textContent = `启动失败: ${e.message || e}`;
+    console.error("main failed:", e);
+    return;
+  }
   await refreshTasks(true);
   connectSSE();
   startPolling();
