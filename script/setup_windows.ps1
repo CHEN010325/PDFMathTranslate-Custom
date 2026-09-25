@@ -81,18 +81,23 @@ if (-not (Test-Path (Join-Path $venv "Scripts\python.exe"))) {
     if ($LASTEXITCODE -ne 0) { Fail "venv 创建失败。" }
 }
 $vp = Join-Path $venv "Scripts\python.exe"
+# pip 源: 默认走清华 TUNA 国内镜像 —— 客户机多在国内, pypi.org 直连只有
+# 1-2MB/s; 国内镜像通常 5-20MB/s。海外部署设环境变量覆盖, 例如恢复官方源:
+#   set PDF2ZH_PIP_INDEX=https://pypi.org/simple
+$pipIndex = if ($env:PDF2ZH_PIP_INDEX) { $env:PDF2ZH_PIP_INDEX } else { "https://pypi.tuna.tsinghua.edu.cn/simple" }
+Log "pip 源: $pipIndex"
 Log "升级 pip ..."
-& $vp -m pip install --upgrade pip
+& $vp -m pip install --upgrade pip -i $pipIndex
 if ($LASTEXITCODE -ne 0) { Fail "pip 升级失败, 请检查网络后重新运行。" }
 # 分两步装: pdf2zh-next 2.9.0 的依赖声明与 babeldoc>=0.6.4 冲突, 无法一次性解析;
 # 与本机验证过的环境一致——先装引擎, 再独立升级 babeldoc(pip 会警告依赖冲突, 属预期)。
 # 不加 -q: 保留 pip 进度条, 客户机网慢时窗口长期无输出会被误认为卡死。
-Log "安装 pdf2zh-next==2.9.0 及全部依赖 (下载约 0.5GB, 网慢时需 30 分钟以上) ..."
-& $vp -m pip install "pdf2zh-next==2.9.0"
+Log "安装 pdf2zh-next==2.9.0 及全部依赖 (下载约 0.5GB, 国内镜像一般 1-3 分钟) ..."
+& $vp -m pip install "pdf2zh-next==2.9.0" -i $pipIndex
 if ($LASTEXITCODE -ne 0) { Fail "pdf2zh-next 安装失败, 请检查网络后重新运行。" }
 Log "pdf2zh-next 安装完成"
 Log "安装 babeldoc==0.6.4 (排版内核) ..."
-& $vp -m pip install "babeldoc==0.6.4"
+& $vp -m pip install "babeldoc==0.6.4" -i $pipIndex
 if ($LASTEXITCODE -ne 0) { Fail "babeldoc 升级失败, 请检查网络后重新运行。" }
 $pkgver = (& $vp -m pip show pdf2zh-next | Select-String "^Version").ToString()
 Log "引擎安装完成: $pkgver"
