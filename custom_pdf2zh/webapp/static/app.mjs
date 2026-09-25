@@ -2,6 +2,9 @@
 
 const $ = (id) => document.getElementById(id);
 
+/* 右上角模型 pill 只显示名字,不带命名空间前缀(s2021008840/hy-mt2 → hy-mt2) */
+const shortModel = (m) => (m || "").includes("/") ? m.split("/").pop() : (m || "");
+
 const state = {
   settings: {},
   langs: {},
@@ -294,7 +297,7 @@ function bindSyncScroll(a, b) {
 async function openTask(entry) {
   state.activeTask = entry;
   renderTaskList();
-  $("active-model-name").textContent = entry.model || state.settings.ollama_model || "";
+  $("active-model-name").textContent = shortModel(entry.model || state.settings.ollama_model || "");
 
   $("source-title").textContent = entry.name;
   $("result-title").textContent = entry.translated ? "已生成" : "尚未翻译";
@@ -391,7 +394,7 @@ async function startTranslate(relPath, name) {
   state.currentTaskId = res.task_id;
   $("source-title").textContent = name;
   $("result-title").textContent = "翻译中…";
-  $("active-model-name").textContent = body.ollama_model;
+  $("active-model-name").textContent = shortModel(body.ollama_model);
   $("result-empty").hidden = true;
   $("translated-preview").hidden = true;
   $("translated-preview").innerHTML = "";
