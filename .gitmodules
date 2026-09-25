@@ -1,3 +1,4 @@
 [submodule "vendor/PDFMathTranslate-next"]
 	path = pdf2zh/kernel/PDFMathTranslate-next.git
-	url = https://github.com/PDFMathTranslate/PDFMathTranslate-next.git
+	url = https://github.com/CHEN010325/PDFMathTranslate-next.git
+	branch = custom

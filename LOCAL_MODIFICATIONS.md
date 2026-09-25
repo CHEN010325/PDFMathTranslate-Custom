@@ -5,6 +5,19 @@ This repository carries local customizations on top of
 Rebase this branch onto `upstream/main` after pulling updates, then re-check
 the items below (upstream changes may conflict or make a patch obsolete).
 
+## 2026-09-25 — 子模块补丁持久化到自有 fork
+
+- 子模块 `pdf2zh_next/translator/translator_impl/ollama.py` 的三组补丁
+  (num_predict 封顶 / token 统计 None 保护 / 重试 100→5)已提交到
+  **https://github.com/CHEN010325/PDFMathTranslate-next** 的 `custom` 分支
+  (commit 75d8b47,基于上游 61a6b68);
+- `.gitmodules` 的 url 改为该 fork、branch 指定 `custom`——
+  **`git clone --recursive` 现在直接得到带补丁的引擎**,不再依赖本地重放;
+- `apply_all_patches.py` 仍然保留:它还负责向 venv 的 gui.py 注入
+  📚 历史页签(该改动在 venv 里,无法随子模块分发),ollama 部分
+  对已打补丁的子模块自动跳过(幂等);
+- 本地子模块已切到 `custom` 分支跟踪。
+
 ## 2026-09-25 — 一键部署脚本 + README 部署指南
 
 - 新增 `script/setup_windows.bat`(ASCII 存根)+ `script/setup_windows.ps1`
