@@ -42,11 +42,20 @@ def index() -> FileResponse:
 
 
 class NoCacheStaticFiles(StaticFiles):
-    """静态资源禁用启发式缓存,保证前端改动刷新即生效。"""
+    """静态资源禁用启发式缓存,保证前端改动刷新即生效。
+
+    另:强制 .js/.mjs 的 Content-Type 为 text/javascript —— module 脚本
+    对 MIME 强校验, 而 Windows 上 Python 的 mimetypes 会读注册表, 个别
+    客户机注册表把 .mjs 注册成错误类型时, 前端模块会被浏览器整体拒绝
+    执行, 页面永远停留在初始态("引擎检测中…")。
+    """
 
     def file_response(self, *args, **kwargs):
         resp = super().file_response(*args, **kwargs)
         resp.headers["Cache-Control"] = "no-cache"
+        full_path = str(args[0]).lower() if args else ""
+        if full_path.endswith((".mjs", ".js")):
+            resp.headers["content-type"] = "text/javascript; charset=utf-8"
         return resp
 
 
