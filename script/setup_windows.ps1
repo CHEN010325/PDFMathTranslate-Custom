@@ -29,23 +29,31 @@ Write-Host "[1/6] 初始化翻译引擎子模块 ..."
 git submodule update --init --recursive
 if ($LASTEXITCODE -ne 0) { Fail "子模块初始化失败, 请检查网络后重试。" }
 
-# ---- 2. 查找 Python 3.10+ ----
+# ---- 2. 查找 Python 3.10-3.13 ----
+# 逐候选探测真实版本:不能只看 py/python 能否启动——新版 Python 安装管理器
+# (py) 的默认版本可能是 3.14+,而 "py -3.12" 指定的版本又未必安装,必须对
+# 每个候选连版本参数一起执行并校验版本号,命中范围内即用。
 Write-Host "[2/6] 查找 Python (需要 3.10-3.13) ..."
-$pycmd = $null
-foreach ($c in @("py -3.12", "py -3.11", "py -3.13", "python")) {
+$snip = "import sys; print('%d.%d' % sys.version_info[:2])"
+$pyExe, $pyArgs, $ver = $null, $null, $null
+foreach ($cand in @(
+    @("py", "-3.12"), @("py", "-3.11"), @("py", "-3.13"), @("py", "-3.10"),
+    @("python", $null), @("python3", $null)
+)) {
     try {
-        $v = & $c.Split(" ")[0] --version 2>$null
-        if ($LASTEXITCODE -eq 0) { $pycmd = $c; break }
+        if ($cand[1]) { $ver = & $cand[0] $cand[1] -c $snip 2>$null }
+        else { $ver = & $cand[0] -c $snip 2>$null }
+        if ($LASTEXITCODE -eq 0 -and "$ver" -match '^\d+\.\d+$' -and
+            [version]"$ver" -ge [version]"3.10" -and [version]"$ver" -lt [version]"3.14") {
+            $pyExe, $pyArgs = $cand[0], $cand[1]
+            break
+        }
     } catch {}
 }
-# py launcher 带版本号: "py -3.12" 需整体执行
-if (-not $pycmd) { Fail "未找到 Python。请安装 3.11/3.12: https://www.python.org/downloads/ (勾选 Add to PATH) 或 winget install Python.Python.3.12" }
-$pyExe, $pyArgs = if ($pycmd -like "py *") { $pycmd.Split(" ")[0], $pycmd.Split(" ")[1] } else { $pycmd, $null }
-$ver = & $pyExe $pyArgs -c "import sys; print('%d.%d' % sys.version_info[:2])"
-if ([version]$ver -lt [version]"3.10" -or [version]$ver -ge [version]"3.14") {
-    Fail "Python $ver 不在支持范围 (3.10-3.13), 请安装 3.11 或 3.12。"
+if (-not $pyExe) {
+    Fail "未找到 Python 3.10-3.13。请安装 3.11/3.12: https://www.python.org/downloads/ (勾选 Add to PATH) 或 winget install Python.Python.3.12"
 }
-Write-Host "      找到 Python $ver"
+Write-Host "      找到 Python $ver ($pyExe $($pyArgs))"
 
 # ---- 3. venv + 引擎 ----
 Write-Host "[3/6] 创建内核虚拟环境并安装 pdf2zh-next 2.9.0 (约 5 分钟) ..."
