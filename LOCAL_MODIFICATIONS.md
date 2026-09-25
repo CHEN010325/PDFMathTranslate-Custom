@@ -5,6 +5,18 @@ This repository carries local customizations on top of
 Rebase this branch onto `upstream/main` after pulling updates, then re-check
 the items below (upstream changes may conflict or make a patch obsolete).
 
+## 2026-09-25 — 一键部署脚本 + README 部署指南
+
+- 新增 `script/setup_windows.bat`(ASCII 存根)+ `script/setup_windows.ps1`
+  (UTF-8 BOM 主逻辑):全新克隆后一键完成 子模块 → 内核 venv
+  (pdf2zh-next 2.9.0 两步安装 + babeldoc 0.6.4)→ 补丁 → Ollama/模型 →
+  桌面快捷方式 → 启动工作台;幂等可续跑。
+  坑位记录:①UTF-8 的 .bat 在中文 Windows 被 cmd 按 GBK 解析会乱码崩溃,
+  必须用"ASCII 存根 + BOM 的 PS1"模式;②pdf2zh-next 2.9.0 依赖声明与
+  babeldoc 0.6.4 冲突,必须分两条 pip install(第二条的冲突警告属预期)。
+- README.md 顶部新增中文一键部署指南(已在全新克隆上端到端实测:
+  部署后工作台启动、补丁齐全、版本正确)。
+
 ## 2026-09-25 — 工作台第二轮:去水印 / 页锚定同步 / 静态缓存治理 / 默认模型定档
 
 - **默认翻译模型定档** `s2021008840/hy-mt2:7b-q4_k_m`:官方技术报告

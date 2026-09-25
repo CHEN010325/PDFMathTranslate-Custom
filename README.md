@@ -1,4 +1,47 @@
 <div align="center">
+
+# 🚀 PDFMathTranslate-Custom 定制版 —— 一键部署
+
+</div>
+
+**本仓库是 [Byaidu/PDFMathTranslate](https://github.com/Byaidu/PDFMathTranslate) 的增强定制版**,在上游精确翻译引擎(BabelDOC)之上提供:
+
+- 🖥️ **现代化工作台界面**(FastAPI + 原生 JS):左侧任务历史卡片管理、右侧**原文/译文双栏逐页同步滚动**对照
+- 📚 **翻译历史库**:每次翻译自动归档,随时回看、重新翻译、一键删除
+- 📄 **三视图输出**:纯译文 / 双语对照(逐页交替)/ 左原文右译文对照 PDF
+- 🔒 **完全本地化**:翻译模型跑在你自己的机器上(Ollama),**文献不经过任何第三方服务器**
+- 💧 **无水印**:已关闭 BabelDOC 免费版水印行,交付件干净
+- 🈶 33+ 语言互译,基于腾讯混元 Hy-MT2 翻译模型([模型主页](https://ollama.com/s2021008840/hy-mt2))
+
+### ⚡ 一键部署(Windows 10/11)
+
+**前提**:Windows 10/11;建议 NVIDIA 显卡(6GB+ 显存,无显卡可跑 CPU 但较慢);已安装 [Git](https://git-scm.com/download/win) 与 [Python 3.10~3.13](https://www.python.org/downloads/)(Ollama 缺失时脚本会自动安装)。
+
+```bat
+git clone --recursive https://github.com/CHEN010325/PDFMathTranslate-Custom.git
+cd PDFMathTranslate-Custom
+script\setup_windows.bat
+```
+
+脚本会自动完成:**子模块初始化 → 内核虚拟环境(pdf2zh-next 2.9.0 + BabelDOC 0.6.4)→ 定制补丁 → Ollama 安装(如缺失)→ 翻译模型下载(约 4.6GB)→ 桌面快捷方式 → 启动工作台**。浏览器自动打开 `http://127.0.0.1:7860`,拖入 PDF 即可翻译。
+
+> 🧪 已在全新克隆上端到端验证。已完成的步骤幂等跳过,失败重跑即可续接。
+> 默认模型为 `s2021008840/hy-mt2:7b-q4_k_m`(7B Q4 量化,官方实测相比原版权重仅 -0.16 XCOMET);需要更高质量可 `ollama pull s2021008840/hy-mt2:7b-q8_0`。
+
+### 🔧 常用操作
+
+| 操作 | 方式 |
+|---|---|
+| 日常启动 | 桌面「PDF翻译工作台」快捷方式,或仓库内 `启动工作台.bat` |
+| 高级参数 GUI(冷门引擎配置) | 运行内核目录下 `.venv\Scripts\pdf2zh_next.exe --gui --server-port 7861` |
+| 引擎升级后恢复定制补丁 | `script\apply_all_patches.py`(幂等,一键重放全部补丁) |
+| 详细改动说明 | 见 [LOCAL_MODIFICATIONS.md](LOCAL_MODIFICATIONS.md) |
+
+---
+
+*(以下为上游 PDFMathTranslate 原版说明)*
+
+<div align="center">
 	<a href="https://go.warp.dev/PDFMathTranslate" target="_blank">
 		<sup>Special thanks to:</sup>
 		<br>
