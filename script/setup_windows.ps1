@@ -182,6 +182,10 @@ title PDF Translation Workbench
 cd /d "$kernel"
 set "PYTHONPATH=$repo"
 set "PDF2ZH_PORT=$port"
+rem 本地 Ollama(127.0.0.1)绕开系统代理: 客户机常见死代理会把 localhost
+rem 请求也塞进代理导致引擎检查/翻译卡死超时; 对真实外网的代理保持原样
+set "NO_PROXY=127.0.0.1,localhost"
+set "no_proxy=127.0.0.1,localhost"
 ".venv\Scripts\python.exe" -m custom_pdf2zh.webapp.server $port
 pause
 "@ | Out-File -FilePath $launcher -Encoding ascii
