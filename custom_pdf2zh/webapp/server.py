@@ -51,6 +51,9 @@ class NoCacheStaticFiles(StaticFiles):
 
 app.mount("/static", NoCacheStaticFiles(directory=STATIC_DIR), name="static")
 
+# 启动回填:历史已完成任务的成品补齐到成品文件夹
+engine.ensure_all_exports()
+
 
 # ---------------------------------------------------------------------------
 # 历史与文件
@@ -186,7 +189,8 @@ async def cancel(request: Request) -> dict:
 
 @app.post("/api/open-library")
 def open_library() -> dict:
-    subprocess.Popen(["explorer", str(engine.LIBRARY_ROOT)])
+    engine.EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    subprocess.Popen(["explorer", str(engine.EXPORT_DIR)])
     return {"ok": True}
 
 

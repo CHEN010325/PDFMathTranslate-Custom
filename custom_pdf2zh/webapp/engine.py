@@ -19,10 +19,12 @@ from datetime import datetime
 from pathlib import Path
 
 import pymupdf
+import shutil
 
 LIBRARY_ROOT = Path("pdf2zh_files").resolve()
 UPLOAD_DIR = LIBRARY_ROOT / "_uploads"
 CACHE_DIR = LIBRARY_ROOT / "_sidecache"
+EXPORT_DIR = LIBRARY_ROOT / "_exports"  # 用户可见的成品文件夹(干净命名)
 PAGE_CACHE_DIR = CACHE_DIR / "pages"
 SETTINGS_FILE = LIBRARY_ROOT / "_webapp_settings.json"
 JOBS_FILE = LIBRARY_ROOT / "_jobs.json"
@@ -197,13 +199,13 @@ def _rebuild_orphan_jobs() -> None:
     """把磁盘上已存在但未登记的翻译产物(旧 gui 会话目录等)纳入登记表。"""
     if not LIBRARY_ROOT.exists():
         return
-    known = {j.get("mono") for j in JOBS} | {j.get("dual") for j in JOBS}
+    known = {str(p).replace("\\", "/") for p in ({j.get("mono") for j in JOBS} | {j.get("dual") for j in JOBS})}
     groups: dict[tuple, dict] = {}
     for pdf in LIBRARY_ROOT.rglob("*.pdf"):
         rel = pdf.relative_to(LIBRARY_ROOT)
-        if rel.parts[0] in ("_uploads", "_imported", "_sidecache"):
+        if rel.parts[0] in ("_uploads", "_imported", "_sidecache", "_exports"):
             continue
-        r = str(rel)
+        r = str(rel).replace("\\", "/")
         if r in known:
             continue
         base, kind = _norm_base(pdf.name)
@@ -322,7 +324,7 @@ def scan_library() -> list[dict]:
         if ap in used:
             continue
         rel = pdf.relative_to(LIBRARY_ROOT)
-        if rel.parts[0] == "_sidecache":
+        if rel.parts[0] in ("_sidecache", "_exports"):
             continue
         base, kind = _norm_base(pdf.name)
         key = (str(rel.parent), base)
@@ -556,6 +558,9 @@ async def _run(task_id: str, pdf_path: Path, settings: dict) -> None:
         entry["stage"] = "完成"
         entry["detail"] = ""
         complete_job(entry["job_id"], entry["mono"], entry["dual"], entry["model"], "done")
+        exported = export_task(entry["name"], entry["mono"], entry["dual"])
+        if exported:
+            log_lines.append("成品已导出到: " + str(EXPORT_DIR))
         BUS.publish({"type": "task_done", "task": public_task(entry)})
     except asyncio.CancelledError:
         entry["status"] = "failed"
@@ -577,11 +582,53 @@ async def _run(task_id: str, pdf_path: Path, settings: dict) -> None:
         TASKS.pop(task_id, None)  # 已落到登记表,内存表即时清理
 
 
+def export_task(name: str, mono_rel: str | None, dual_rel: str | None) -> list[str]:
+    """把成品按干净命名拷入成品文件夹(同名覆盖 = 始终最新版)。"""
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    out = []
+    for rel, suffix in ((mono_rel, "纯译文"), (dual_rel, "中英对照")):
+        if not rel:
+            continue
+        try:
+            src_pdf = _resolve(rel)
+            dst = EXPORT_DIR / f"{name}-{suffix}.pdf"
+            shutil.copy2(src_pdf, dst)
+            out.append(str(dst))
+        except Exception:
+            continue
+    return out
+
+
+def ensure_all_exports() -> int:
+    """启动回填:历史上已完成的任务补齐成品文件夹(缺失才拷)。"""
+    load_jobs()
+    n = 0
+    for j in JOBS:
+        if j.get("status") == "done" and (j.get("mono") or j.get("dual")):
+            name = j["name"]
+            if not (EXPORT_DIR / f"{name}-纯译文.pdf").exists() and not (
+                EXPORT_DIR / f"{name}-中英对照.pdf"
+            ).exists():
+                n += len(export_task(name, j.get("mono"), j.get("dual")))
+    return n
+
+
 def delete_entries(paths: list[str], job_ids: list[str]) -> int:
     """删除库内文件与登记表条目,返回成功删除的文件数。"""
     n = 0
     parent_dirs: set[Path] = set()
     deleted: set[str] = set()
+    # 删除成品文件夹中同名导出件
+    for jid in job_ids:
+        for j in JOBS:
+            if j["id"] == jid:
+                for suffix in ("纯译文", "中英对照"):
+                    p = EXPORT_DIR / f"{j['name']}-{suffix}.pdf"
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass
+                break
     for rel in paths:
         try:
             p = _resolve(rel)

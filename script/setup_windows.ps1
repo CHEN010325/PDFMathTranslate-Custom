@@ -99,6 +99,16 @@ if (Get-Command $ollama -ErrorAction SilentlyContinue) {
     Write-Host "             ollama pull s2021008840/hy-mt2:7b-q4_k_m" -ForegroundColor Yellow
 }
 
+    # 预下载 BabelDOC 排版/公式模型资产(~1-2GB): 没有这一步, 用户首次翻译时
+    # 才会从 funstory CDN 下载, 国内网络可能很慢甚至失败(--warmup 只下载校验后退出)
+    Write-Host "      预下载 BabelDOC 模型资产 (--warmup) ..."
+    & (Join-Path $venv "Scripts\pdf2zh_next.exe") --warmup
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "      [警告] 资产预下载失败, 首次翻译时会自动重试。" -ForegroundColor Yellow
+    } else {
+        Write-Host "      资产就绪。"
+    }
+
 # ---- 6. 启动器与桌面快捷方式 ----
 Write-Host "[6/6] 生成启动器 ..."
 $launcher = Join-Path $repo "start_workbench.bat"
