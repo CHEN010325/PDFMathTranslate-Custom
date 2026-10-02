@@ -183,3 +183,4 @@ uv.lock
 *.pdf
 *.docx
 .gradio/
+.mimosa/

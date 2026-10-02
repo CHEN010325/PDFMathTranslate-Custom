@@ -5,6 +5,29 @@ This repository carries local customizations on top of
 Rebase this branch onto `upstream/main` after pulling updates, then re-check
 the items below (upstream changes may conflict or make a patch obsolete).
 
+## 2026-10-02 — 版面解析启用 GPU（DirectML），单页 0.53s → 0.08s
+
+- **根因**:babeldoc 上游在 doclayout.py 里**故意只选 CPU provider**
+  (注释: "directml/cuda may encounter problems under special
+  circumstances"),DocLayout-YOLO 全程跑 CPU。
+- **改动**:
+  1. 内核 venv 卸载 `onnxruntime` 换装 `onnxruntime-directml 1.24.4`
+     (Windows 免 CUDA 工具包即可用 N 卡,TITAN V 实测可用);
+  2. venv `babeldoc/docvision/doclayout.py` 打补丁:provider 选择改为
+     GPU 优先(DML/CUDA,正则 dml|cuda)+ CPU 兜底;上游只保留 CoreML 分支
+     (macOS)不变。
+- **实测**:1024 输入单页推理 CPU 均值 0.53s → DML 均值 0.082s(约 6.5×);
+  `get_providers()` 确认 DmlExecutionProvider 生效。
+- **注意**:
+  - `script/setup_windows.ps1` 重建 venv 时会装回 CPU 版 onnxruntime,
+    且 pip 升级 babeldoc 会覆盖 doclayout.py——重部署后需重放本补丁;
+  - GPU 显存与 Ollama 常驻模型共用(TITAN V 12GB):云端引擎+本地解析
+    无冲突;若同时跑本地 LLM 翻译,DML 约需数百 MB,注意余量;
+  - rapidocr(OCR)走自己的会话,数字原生 PDF 不受影响;扫描件检测
+    (0.3s 级)仍在 CPU,占比可忽略。
+- 主仓库 Gradio GUI 用的 Anaconda 环境 babeldoc 未动(主力 UI 是工作台,
+  走 venv);需要时同样方法可再加。
+
 ## 2026-09-25 — 修复:前端启动 ReferenceError("引擎检测中"真根因)
 
 - **根因**:fb7b81e 给 initSettings 加 try/catch 时,把 fetch 解构出的
@@ -214,7 +237,10 @@ the items below (upstream changes may conflict or make a patch obsolete).
 3. **`pdf2zh/kernel/v2_bridge.py`** — input file paths are resolved to
    absolute paths: the precise-kernel worker subprocess runs with its own
    cwd (the submodule dir), so relative paths (e.g. `pdf2zh_files/x.pdf`
-   from the GUI) failed with "File does not exist".
+   from the GUI) failed with "File does not exist". Additionally (2026-10-02),
+   v1's `SILICON_API_KEY`/`SILICON_MODEL` are aliased to the v2 engine's
+   `SILICONFLOW_*` env names, so the SiliconFlow key configured via the GUI
+   works through the precise kernel (实测 tencent/Hunyuan-MT-7B 5 页 102s)。
 4. **`pdf2zh/gui.py`** — after translation, use the output paths reported
    by the kernel (`TranslateResult.mono_pdf/dual_pdf`) instead of assuming
    legacy naming (`-mono.pdf`). The precise kernel writes
@@ -229,14 +255,18 @@ the items below (upstream changes may conflict or make a patch obsolete).
    possibly stuck in a repetition loop (temperature 0) until the budget is
    exhausted — the GUI progress bar appears frozen meanwhile.
 
-   **Since 2026-09-23 the precise kernel venv runs `pdf2zh-next==2.9.0`
-   installed from PyPI** (not the editable submodule checkout, whose branch
-   only had 2.8.2). The patch is applied to the *installed* file
-   `.venv/Lib/site-packages/pdf2zh_next/translator/translator_impl/ollama.py`
-   in **two** places (`do_translate` and `do_llm_translate`). After any
-   `pip install -U pdf2zh-next` inside the venv, re-apply it:
-   replace `self.options["num_predict"] = max_token` with
-   `self.options["num_predict"] = min(max_token, 8192)` in both spots.
+   **更正(2026-10-03 审查发现)**:2026-09-23 曾把 venv 升级到 PyPI 的
+   pdf2zh-next 2.9.0 并以为这就是运行版本——**实际不然**:precise 内核的
+   worker 以 cwd=子模块目录 + `PYTHONPATH=子模块` 运行,工作台启动器也
+   cd 进子模块,`import pdf2zh_next` 一律解析到**子模块里的源码**
+   (custom 分支,基于上游 61a6b68 + 全部补丁),venv site-packages 的
+   2.9.0 从未真正执行过翻译。真正的引擎版本以子模块 custom 分支为准;
+   子模块本地 checkout 于 2026-10-03 归位到 fork 的 custom 分支
+   (e1eb6eb = num_predict 封顶×2 + token 统计 None 保护×2 + 重试
+   100→5×2 + style 标签归一化×2,此前本地漂移在 61a6b68 且只贴了
+   封顶补丁的一半)。venv 中的 2.9.0 副本与 babeldoc/onnxruntime 等
+   依赖仍被使用,ollama.py 补丁需同时存在于两处
+   (由 `script/apply_all_patches.py` 幂等维护)。
 
 ## Environment notes
 

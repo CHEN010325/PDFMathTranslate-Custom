@@ -181,6 +181,15 @@ def request_to_env(request: Any) -> dict[str, str]:
         if v2_key not in env and key in os.environ:
             env[v2_key] = os.environ[key]
 
+    # v1's SiliconTranslator uses SILICON_API_KEY/SILICON_MODEL, but the v2
+    # engine reads SILICONFLOW_*; alias them so GUI-configured keys work.
+    if "PDF2ZH_SILICON_API_KEY" in env:
+        env.setdefault(
+            "PDF2ZH_SILICONFLOW_API_KEY", env.pop("PDF2ZH_SILICON_API_KEY")
+        )
+    if "PDF2ZH_SILICON_MODEL" in env:
+        env.setdefault("PDF2ZH_SILICONFLOW_MODEL", env.pop("PDF2ZH_SILICON_MODEL"))
+
     # Handle service:model → PDF2ZH_{ENGINE}_MODEL
     service_raw = data.get("service", "google")
     service, model = _split_service_model(service_raw)
