@@ -5,6 +5,27 @@ This repository carries local customizations on top of
 Rebase this branch onto `upstream/main` after pulling updates, then re-check
 the items below (upstream changes may conflict or make a patch obsolete).
 
+## 2026-10-03 — 修复:拖放一次却上传两遍(任务列表出现两个相同任务)
+
+- **现象**:把 PDF 拖进"选择文档开始翻译"区,一次操作在"最近任务"出
+  现两条记录,第二份输入文件带 `-2` 后缀;两个会话目录同秒创建,各自
+  完整翻译一遍。两份上传落盘时间相差 2 毫秒,排除人工双击。
+- **根因**:`index.html` 里空状态拖放区 `#source-empty` 嵌套在预览面板
+  `#source-viewer` 内部,而 `app.mjs` 给两层都绑了 `drop` 事件——drop
+  在内层触发后冒泡到外层再触发一遍,`handleFiles` 被调用两次,同一
+  文件并发上传两份。点"选择文件"按钮走文件对话框只有单绑定,所以
+  9-25 的端到端测试(用对话框)未暴露此问题。
+- **修复(两层防御)**:
+  1. 拖放只绑最外层 `#source-viewer`,内层 drop 冒泡自然覆盖;
+  2. `handleFiles` 加 `uploadBusy` 互斥锁,上传进行中忽略重复触发,
+     今后任何事件层双触发都只会传一份。
+- **验证**:浏览器内对 `#source-empty` 连续派发两次带文件的 drop
+  事件(复现旧场景),服务端 `_uploads` 仅落盘一份、任务表仅新增
+  一条;测试任务随后经 /api/cancel + /api/delete 清理,无复活。
+  index.html 脚本版本 v=5 → v=6。
+- **教训**:同一事件处理器绑到嵌套元素而不 stopPropagation,等于隐式
+  双绑定;UI 事件触发的写操作应在函数层加互斥,不能只信绑定层唯一。
+
 ## 2026-10-02 — 版面解析启用 GPU（DirectML），单页 0.53s → 0.08s
 
 - **根因**:babeldoc 上游在 doclayout.py 里**故意只选 CPU provider**

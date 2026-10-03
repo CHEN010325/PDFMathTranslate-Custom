@@ -541,20 +541,27 @@ function pickFiles() {
   $("file-input").click();
 }
 
+let uploadBusy = false; // 上传互斥: 事件层意外双触发(如嵌套元素冒泡)时只处理第一批
 async function handleFiles(fileList) {
+  if (uploadBusy) return;
   const files = [...fileList].filter((f) => f.name.toLowerCase().endsWith(".pdf"));
   if (!files.length) return toast("请选择 PDF 文件");
-  for (const f of files) {
-    const form = new FormData();
-    form.append("file", f);
-    try {
-      const up = await fetchJSON("/api/upload", { method: "POST", body: form });
-      toast(`已上传 ${up.name},开始翻译…`, 3000);
-      await startTranslate(up.uploaded, up.name);
-    } catch (e) {
-      appendLog(`上传失败 ${f.name}: ${e.message}`);
-      toast(`上传失败: ${e.message}`, 3000);
+  uploadBusy = true;
+  try {
+    for (const f of files) {
+      const form = new FormData();
+      form.append("file", f);
+      try {
+        const up = await fetchJSON("/api/upload", { method: "POST", body: form });
+        toast(`已上传 ${up.name},开始翻译…`, 3000);
+        await startTranslate(up.uploaded, up.name);
+      } catch (e) {
+        appendLog(`上传失败 ${f.name}: ${e.message}`);
+        toast(`上传失败: ${e.message}`, 3000);
+      }
     }
+  } finally {
+    uploadBusy = false;
   }
 }
 
@@ -776,15 +783,13 @@ function bindUI() {
     b.onclick = () => showResultView(b.dataset.resultView);
   });
 
-  const zone = $("source-empty");
-  const viewer = $("source-viewer");
-  for (const el of [zone, viewer]) {
-    el.addEventListener("dragover", (e) => e.preventDefault());
-    el.addEventListener("drop", (e) => {
-      e.preventDefault();
-      if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
-    });
-  }
+  // 拖放只绑最外层 #source-viewer: 内层 #source-empty 是它的子元素,
+  // drop 会冒泡上来, 两层都绑会让一次拖放触发两次 handleFiles, 同一文件被传两遍
+  $("source-viewer").addEventListener("dragover", (e) => e.preventDefault());
+  $("source-viewer").addEventListener("drop", (e) => {
+    e.preventDefault();
+    if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
+  });
 
   $("open-mono").onclick = async () => {
     const target = $("open-mono").dataset.mono;
