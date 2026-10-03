@@ -121,6 +121,40 @@ if ($haveEngine -and $haveBabel) {
     Log "引擎安装完成: $pkgver"
 }
 
+# ---- 3.5 版面识别 GPU 加速组件(自动探测,可选) ----
+# DocLayout-YOLO 版面模型走 onnxruntime:GPU 版单页约 0.02s,CPU 版约 0.55s(5070 Ti 实测)。
+# onnxruntime-gpu 必须锁 1.26.x——1.27 起构建切换到 CUDA 13,与本方案的 pip
+# nvidia-*-cu12 运行库轮子不匹配;轮子自带全部 DLL,客户机无需安装 CUDA Toolkit,
+# 引擎启动时由 custom_pdf2zh/webapp/engine.py 注入 DLL 搜索路径。
+# 探测不到 NVIDIA 显卡时保持 pdf2zh-next 自带的 CPU 版:功能等价,babeldoc
+# 补丁会自动回退 CPU,仅版面解析稍慢。PDF2ZH_NO_GPU=1 可强制跳过。
+function Test-NvidiaGpu {
+    try { if (& nvidia-smi --query-gpu=name --format=csv,noheader 2>$null) { return $true } } catch {}
+    try {
+        if (Get-CimInstance Win32_VideoController -ErrorAction Stop |
+                Where-Object { $_.Name -match "NVIDIA" }) { return $true }
+    } catch {}
+    return $false
+}
+
+Log "探测显卡: 决定版面识别用 GPU 还是 CPU"
+if ($env:PDF2ZH_NO_GPU) {
+    Write-Host "      按要求跳过 GPU 组件 (PDF2ZH_NO_GPU=1), 版面识别走 CPU。"
+} elseif (Test-NvidiaGpu) {
+    $haveOrtGpu = (& $vp -m pip show onnxruntime-gpu 2>$null | Select-String "^Version: 1\.26\.")
+    if ($haveOrtGpu) {
+        Log "NVIDIA 显卡在位, onnxruntime-gpu 1.26.x + CUDA 12 运行库已就绪, 跳过"
+    } else {
+        Log "检测到 NVIDIA 显卡, 安装 GPU 版面识别组件 (下载约 1.5GB, 视网速 2-10 分钟) ..."
+        # CPU 版与 GPU 版不能共存(同占 onnxruntime 模块名), 先卸再装
+        & $vp -m pip uninstall -y onnxruntime 2>$null | Out-Null
+        Install-PipPackage "onnxruntime-gpu==1.26.0 nvidia-cuda-runtime-cu12==12.9.79 nvidia-cuda-nvrtc-cu12==12.9.86 nvidia-cudnn-cu12==9.27.0.42 nvidia-cublas-cu12==12.9.2.10 nvidia-cufft-cu12==11.4.1.4 nvidia-cusparse-cu12==12.5.10.65 nvidia-cusolver-cu12==11.7.5.82 nvidia-nvjitlink-cu12==12.9.86" "GPU 版面识别组件"
+        Log "GPU 组件安装完成 (无 GPU/驱动异常时运行期仍会自动回退 CPU)"
+    }
+} else {
+    Write-Host "      未检测到 NVIDIA 显卡, 版面识别走 CPU (功能不受影响)。"
+}
+
 # ---- 4. 补丁 ----
 Write-Host "[4/6] 应用定制补丁 (Ollama 修复 / 历史页签) ..."
 Log "执行: apply_all_patches.py"

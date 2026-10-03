@@ -27,8 +27,82 @@ OLLAMA_COPIIES = [
     SUBMODULE / "pdf2zh_next" / "translator" / "translator_impl" / "ollama.py",
     VENV_SITE / "pdf2zh_next" / "translator" / "translator_impl" / "ollama.py",
 ]
+DOCLAYOUT_PY = VENV_SITE / "babeldoc" / "docvision" / "doclayout.py"
 
 problems: list[str] = []
+
+
+def patch_doclayout_gpu() -> None:
+    """babeldoc 版面识别模型启用 GPU(自动探测,失败回退 CPU)。
+
+    上游 babeldoc 在 provider 选择处硬性过滤掉 CUDA/DML(注释称"cuda 在
+    特殊情况下可能出问题"),只用 CPU。本补丁改为:构建含 CUDA/DirectML
+    provider 时优先尝试——会话真建出来 + 冒烟推理通过才用 GPU,任何失败
+    回退 CPU。依赖 venv 装有 onnxruntime-gpu(N 卡,≤1.26.x 为 CUDA 12
+    构建,1.27+ 已切 CUDA 13)或 onnxruntime-directml(任意 DX12 显卡),
+    外加 pip nvidia-*-cu12 运行库轮子;DLL 搜索路径由
+    custom_pdf2zh/webapp/engine.py::_prepend_cuda_dll_dirs 在运行时注入。
+    没有可用 GPU 的机器上本补丁行为与原版一致(纯 CPU)。
+    """
+    if not DOCLAYOUT_PY.exists():
+        problems.append(f"doclayout.py 不存在: {DOCLAYOUT_PY}")
+        return
+    src = DOCLAYOUT_PY.read_text(encoding="utf-8")
+    if "自动探测 GPU" in src:
+        print("doclayout.py GPU 补丁: 已是最新(跳过)")
+        return
+
+    anchor = (
+        "        else:\n"
+        "            for provider in available_providers:\n"
+        "                # disable dml|cuda|\n"
+        "                # directml/cuda may encounter problems under special circumstances\n"
+        "                if re.match(r\"cpu\", provider, re.IGNORECASE):\n"
+        "                    logger.info(f\"Available Provider: {provider}\")\n"
+        "                    providers.append(provider)"
+    )
+    replacement = (
+        "        else:\n"
+        "            # 自动探测 GPU(custom_pdf2zh 补丁,替代上游\"只用 CPU\"):\n"
+        "            # 构建自带 CUDA/DirectML provider 时优先尝试;会话真建出来 +\n"
+        "            # 冒烟推理通过才用 GPU,任何一步失败都回退 CPU——没 GPU 或\n"
+        "            # 驱动不匹配的机器零感知,行为与原版一致。\n"
+        "            gpu_providers = [\n"
+        "                p\n"
+        "                for p in available_providers\n"
+        "                if re.match(r\"cuda|dml\", p, re.IGNORECASE)\n"
+        "            ]\n"
+        "            if gpu_providers:\n"
+        "                try:\n"
+        "                    self.model = onnxruntime.InferenceSession(\n"
+        "                        model.SerializeToString(),\n"
+        "                        providers=gpu_providers + [\"CPUExecutionProvider\"],\n"
+        "                    )\n"
+        "                    if not (set(gpu_providers) & set(self.model.get_providers())):\n"
+        "                        raise RuntimeError(f\"no GPU provider active: {self.model.get_providers()}\")\n"
+        "                    self.model.run(\n"
+        "                        None,\n"
+        "                        {\"images\": np.zeros((1, 3, 640, 640), dtype=np.float32)},\n"
+        "                    )\n"
+        "                    logger.info(\n"
+        "                        f\"DocLayout ONNX: using GPU ({self.model.get_providers()[0]})\"\n"
+        "                    )\n"
+        "                    self.lock = threading.Lock()\n"
+        "                    return\n"
+        "                except Exception as exc:  # noqa: BLE001 — GPU 只是加速项,必须可回退\n"
+        "                    logger.warning(f\"DocLayout ONNX: GPU unusable ({exc}), using CPU\")\n"
+        "            for provider in available_providers:\n"
+        "                # disable dml|cuda|\n"
+        "                # directml/cuda may encounter problems under special circumstances\n"
+        "                if re.match(r\"cpu\", provider, re.IGNORECASE):\n"
+        "                    logger.info(f\"Available Provider: {provider}\")\n"
+        "                    providers.append(provider)"
+    )
+    if anchor not in src:
+        problems.append("doclayout.py: 找不到 CPU-only provider 选择锚点(上游结构可能已变)")
+        return
+    DOCLAYOUT_PY.write_text(src.replace(anchor, replacement, 1), encoding="utf-8")
+    print("doclayout.py GPU 补丁: 已更新")
 
 
 def patch_gui() -> None:
@@ -227,6 +301,7 @@ def patch_ollama(path: Path) -> None:
 def main() -> int:
     print(f"仓库: {REPO}\n")
     patch_gui()
+    patch_doclayout_gpu()
     print()
     for ollama_path in OLLAMA_COPIIES:
         patch_ollama(ollama_path)

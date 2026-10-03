@@ -5,6 +5,58 @@ This repository carries local customizations on top of
 Rebase this branch onto `upstream/main` after pulling updates, then re-check
 the items below (upstream changes may conflict or make a patch obsolete).
 
+## 2026-10-03 — 升级闭环:重装部署自动装 GPU 组件 + 队列细节收尾
+
+- **需求**:用户"升级"的定义 = 重新拉取最新代码 + 重新部署(setup_windows.ps1)。
+  此前 GPU 依赖(onnxruntime-gpu 1.26 + nvidia-*-cu12 轮子)是手动装的,
+  重装 venv 会静默回退 CPU。
+- **改动**:
+  1. `setup_windows.ps1` 新增 3.5 步:探测 NVIDIA 显卡(nvidia-smi →
+     Win32_VideoController 兜底),有卡则卸 CPU 版 onnxruntime 并按锁定
+     版本安装 GPU 全家桶;无卡保持 CPU 版(自动回退语义)。幂等:已装
+     1.26.x 直接跳过;`PDF2ZH_NO_GPU=1` 可强制跳过。
+  2. `/api/tasks` 把排队任务也叠加到登记卡片(`queued: true`),前端
+     卡片显示"排队中"、关服确认把排队任务计入(此前关服会静默丢弃队列)。
+  3. `engine.cancel_translation` 排队分支:若该文档已有历史成品,取消
+     只终止本次重复翻译、登记表状态回 done(complete_job 保留 mono/dual
+     但会把 status 置 failed / model 抹 None,不能直接用于已译文档)。
+- **验证**:PS1 Parser 零错误;Test-NvidiaGpu 本机 True;幂等检查识别
+  已装 1.26.x 跳过 1.5GB 下载;双提交同文档 → 一 running 一 queued,
+  取消排队任务后登记表保持 done 且成品完好。
+
+## 2026-10-03 — 增强:服务端串行翻译队列 + 版面识别 GPU 自动探测(CUDA/DML)+ 全程低占用
+
+- **需求**:用户一次提交多个 PDF(如 12 篇)时,服务端必须**自动逐个**翻译;
+  版面识别用 GPU 提速;机器没 GPU/不适合跑就自动回退 CPU;整体资源占用
+  要低,不能让用户电脑卡顿。
+- **改动**:
+  1. `engine.py` 串行队列:`start_translation` 不再直接并发起内核,任务
+     以 `queued`(排队中)入队,单 worker 逐个取出执行;排队任务可取消
+     (`cancel_translation` 分支)。前端无需改动(排队任务本来就渲染为
+     "待处理",开跑后变"运行中")。
+  2. `engine.py::_prepend_cuda_dll_dirs`:导入时把 venv 内 pip
+     `nvidia-*-cu12` 轮子自带的 CUDA/cuDNN DLL 目录注入 PATH(前插,可
+     压过系统旧版 CUDA 11)+ `os.add_dll_directory`——不依赖系统装
+     CUDA,自包含。纯 CPU 构建下无轮子,静默跳过。
+  3. `engine.py::_lower_process_priority`:工作台进程设为 BELOW_NORMAL
+     优先级(Windows 子进程继承)——翻译重活不抢前台应用 CPU。
+  4. venv `babeldoc/docvision/doclayout.py` 补丁(上游硬性只选 CPU):
+     构建含 CUDA/DirectML provider 时优先尝试,会话真建 + 640×640 冒烟
+     推理通过才用 GPU,任何失败回退 CPU。**已纳入 `apply_all_patches.py`**
+     (10-02 的 DirectML 补丁当年没进重放脚本,venv 更新后被上游覆盖丢失,
+     本次一并修复该问题)。
+  5. venv 依赖:`onnxruntime` → `onnxruntime-gpu 1.26.0`(1.27+ 弃用
+     CUDA 12,勿升)+ `nvidia-{cuda-runtime,cudnn,cublas,cufft,cusparse,
+     cusolver,nvjitlink,nvrtc}-cu12`(Windows 轮子,cudnn 9.27 含 50 系
+     Blackwell 内核)。
+- **实测**(RTX 5070 Ti):`get_providers()` 确认 CUDAExecutionProvider
+  生效;1024 输入单页推理 CPU 0.55s → GPU 热身 0.02s(约 27×);JIT 编译
+  首跑 68s 一次,之后新进程冷启动 0.7s(命中 ~/.nv ComputeCache);
+  OnnxModel 端到端 from_pretrained 1.5s + predict 0.03s。
+- **注意**:排队的任务在 `/api/tasks` 中不叠加 running 态,以登记表
+  "待处理"卡片呈现;关服确认弹窗目前只统计运行中任务,排队中的会随
+  停机丢弃(可接受,后续可加计数)。
+
 ## 2026-10-03 — 修复:旋转页(横向大表格)译文渲染错乱 + LLM 占位符残留
 
 - **现象**:FMDS0729(148 页)译文中,源 PDF 全部 23 个 `/Rotate 90`

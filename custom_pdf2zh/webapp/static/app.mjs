@@ -273,12 +273,12 @@ async function saveSettings() {
   toast("设置已保存");
 }
 
-/* 关闭服务:有任务在跑先提示;关闭成功后冻结页面,提示用户关闭标签页 */
+/* 关闭服务:有任务在跑/在排队先提示;关闭成功后冻结页面,提示用户关闭标签页 */
 async function shutdownService() {
-  const running = state.tasks.filter((t) => t.running).length;
+  const running = state.tasks.filter((t) => t.running || t.queued).length;
   let force = false;
   if (running > 0) {
-    if (!confirm(`有 ${running} 个任务正在运行，关闭服务会中断它们（已完成的任务不受影响）。\n确定关闭服务？`)) return;
+    if (!confirm(`有 ${running} 个任务正在运行或排队，关闭服务会中断它们（已完成的任务不受影响）。\n确定关闭服务？`)) return;
     force = true;
   } else if (!confirm("确定关闭翻译服务？\n关闭后本页面无法继续操作；下次使用请重新运行 start_workbench.bat。")) return;
   const res = await fetchJSON("/api/shutdown", {
@@ -332,6 +332,7 @@ function renderTaskList() {
 
   for (const it of items) {
     const running = !!it.running;
+    const queued = !running && !!it.queued;
     const card = document.createElement("div");
     card.className = `task-item status-${running ? "running" : it.status === "failed" ? "failed" : it.translated ? "done" : "pending"}`;
     if (state.activeTask && it.id && state.activeTask.id === it.id) card.classList.add("active");
@@ -355,7 +356,7 @@ function renderTaskList() {
 
     const stateEl = document.createElement("div");
     stateEl.className = "task-state";
-    stateEl.textContent = running ? "运行中" : it.status === "failed" ? "失败" : it.translated ? "完成" : "待处理";
+    stateEl.textContent = running ? "运行中" : queued ? "排队中" : it.status === "failed" ? "失败" : it.translated ? "完成" : "待处理";
 
     const actions = document.createElement("div");
     actions.className = "task-actions";

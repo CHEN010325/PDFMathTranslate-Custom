@@ -77,9 +77,10 @@ def list_tasks() -> dict:
     entries = engine.scan_library()
     loose_running = []
     for t in engine.TASKS.values():
-        if t["status"] != "running":
+        if t["status"] not in ("running", "queued"):
             continue
-        # 运行状态叠到同一条登记上,避免同文档出现两张卡片
+        is_running = t["status"] == "running"
+        # 运行/排队状态叠到同一条登记上,避免同文档出现两张卡片
         hit = next(
             (e for e in entries if e.get("id") and e["id"] == t.get("job_id")), None
         )
@@ -95,14 +96,18 @@ def list_tasks() -> dict:
                 None,
             )
         payload = engine.public_task(t)
+        state_key = "running" if is_running else "queued"
         if hit is not None:
-            hit["running"] = True
-            hit["task_id"] = t["id"]
-            hit["progress"] = payload["progress"]
-            hit["stage"] = payload["stage"]
-            hit["status"] = "running"
+            # 同文档重复提交且已有任务在跑:运行态优先,排队的不覆盖其叠层
+            if is_running or not hit.get("running"):
+                hit[state_key] = True
+                hit["task_id"] = t["id"]
+                hit["progress"] = payload["progress"]
+                hit["stage"] = payload["stage"]
+                if is_running:
+                    hit["status"] = "running"
         else:
-            payload["running"] = True
+            payload[state_key] = True
             loose_running.append(payload)
     return {"tasks": entries, "running": loose_running}
 

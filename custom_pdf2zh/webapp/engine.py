@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
+import os
 import re
 import time
 import types
@@ -30,6 +32,63 @@ EXPORT_DIR = LIBRARY_ROOT / "_exports"  # 用户可见的成品文件夹(干净�
 PAGE_CACHE_DIR = CACHE_DIR / "pages"
 SETTINGS_FILE = LIBRARY_ROOT / "_webapp_settings.json"
 JOBS_FILE = LIBRARY_ROOT / "_jobs.json"
+
+
+def _prepend_cuda_dll_dirs() -> None:
+    """版面识别 GPU 加速前置:把 pip 安装的 CUDA/cuDNN 运行库目录注入 DLL 搜索路径。
+
+    必须在 onnxruntime 首次导入前执行(本模块导入时即满足;内核在 _run 里
+    才惰性 import babeldoc→onnxruntime)。系统装没装 CUDA 都无所谓——
+    优先用 venv 里 pip 拉下来的 nvidia-* 轮子自带 DLL,自包含、免客户配置;
+    一个目录都没找到就静默跳过(纯 CPU onnxruntime 构建本来也用不上)。
+    """
+    if os.name != "nt":
+        return  # os.add_dll_directory 仅 Windows 有;非 Windows 无 DLL 搜索路径问题
+    try:
+        import sysconfig
+
+        nvidia_root = Path(sysconfig.get_paths()["purelib"]) / "nvidia"
+        if not nvidia_root.is_dir():
+            return
+        dll_dirs = sorted(p for p in nvidia_root.glob("*/bin") if p.is_dir())
+        if not dll_dirs:
+            return
+        # PATH 前插,抢占系统里可能存在的旧版 CUDA(如 CUDA 11)
+        os.environ["PATH"] = ";".join(str(p) for p in dll_dirs) + ";" + os.environ.get("PATH", "")
+        for p in dll_dirs:
+            os.add_dll_directory(str(p))
+        logging.getLogger("custom_pdf2zh.engine").info(
+            "CUDA DLL dirs injected: %s", ", ".join(p.name for p in dll_dirs)
+        )
+    except Exception:
+        pass  # GPU 属于增强项,任何失败都不能影响启动
+
+
+_prepend_cuda_dll_dirs()
+
+
+def _lower_process_priority() -> None:
+    """整体降优先级:工作台进程设为"低于正常",内核子进程在 Windows 上继承
+    该优先级——翻译重活不抢用户前台应用的 CPU,电脑保持流畅。
+    (配合串行队列"同时只跑一个任务"+ GPU 版面识别,整体占用压到最低)
+    """
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        handle = ctypes.windll.kernel32.GetCurrentProcess()
+        if not ctypes.windll.kernel32.SetPriorityClass(handle, 0x00004000):  # BELOW_NORMAL_PRIORITY_CLASS
+            raise OSError("SetPriorityClass failed")
+        logging.getLogger("custom_pdf2zh.engine").info(
+            "process priority set to BELOW_NORMAL (children inherit)"
+        )
+    except Exception:
+        pass  # 降优先级失败不影响功能
+
+
+_lower_process_priority()
+
 
 DEFAULT_SETTINGS: dict = {
     "engine": "Ollama",
@@ -768,9 +827,9 @@ def start_translation(pdf_path: Path, settings: dict) -> str:
         "id": task_id,
         "job_id": job["id"],
         "name": pdf_path.stem,
-        "status": "running",
+        "status": "queued",
         "progress": 0,
-        "stage": "准备中",
+        "stage": "排队中",
         "detail": "",
         "input": str(pdf_path),
         "mono": None,
@@ -778,16 +837,73 @@ def start_translation(pdf_path: Path, settings: dict) -> str:
         "error": None,
         "started": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "model": display_model(settings),
+        # 排队参数暂存:_run 启动时由 worker 取出(public_task 已排除本字段)
+        "queue": {"pdf": str(pdf_path), "settings": settings},
     }
     TASKS[task_id] = entry
     BUS.publish({"type": "task_update", "task": public_task(entry)})
-    RUNNING[task_id] = asyncio.get_running_loop().create_task(
-        _run(task_id, pdf_path, settings)
-    )
+    _enqueue_translation(task_id)
     return task_id
 
 
+# ---------------------------------------------------------------------------
+# 串行翻译队列:同一时刻只跑一个翻译,其余自动排队(产品约定——用户一次
+# 提交多少个 PDF 都逐个处理,避免内存与翻译 API 被并发打爆)。
+# ---------------------------------------------------------------------------
+
+_QUEUE: asyncio.Queue | None = None
+_WORKER: asyncio.Task | None = None
+
+
+def _enqueue_translation(task_id: str) -> None:
+    global _QUEUE, _WORKER
+    if _QUEUE is None:
+        _QUEUE = asyncio.Queue()
+    _QUEUE.put_nowait(task_id)
+    if _WORKER is None or _WORKER.done():
+        _WORKER = asyncio.get_running_loop().create_task(_translation_worker())
+
+
+async def _translation_worker() -> None:
+    while True:
+        task_id = await _QUEUE.get()
+        entry = TASKS.get(task_id)
+        if entry is None or entry["status"] != "queued":
+            continue  # 排队期间被取消的任务,直接跳过
+        args = entry.pop("queue", None) or {}
+        entry["status"] = "running"
+        BUS.publish({"type": "task_update", "task": public_task(entry)})
+        # 真正的翻译仍包成独立任务:取消语义与旧版一致(cancel_translation
+        # 按 task_id 取消当前这一个,worker 本身不受影响)
+        runner = asyncio.get_running_loop().create_task(
+            _run(task_id, Path(args.get("pdf", "")), args.get("settings") or {})
+        )
+        RUNNING[task_id] = runner
+        try:
+            await runner
+        except asyncio.CancelledError:
+            pass  # 用户取消:_run 的 CancelledError 分支已收尾
+        except Exception:  # noqa: BLE001 — _run 已把错误落到任务上,兜底保证 worker 不死
+            logging.getLogger("custom_pdf2zh.engine").exception(
+                "translation worker: task %s crashed", task_id
+            )
+
+
 def cancel_translation(task_id: str) -> bool:
+    # 还在排队的任务:直接标记取消,worker 取到时按状态跳过
+    entry = TASKS.get(task_id)
+    if entry is not None and entry["status"] == "queued":
+        TASKS.pop(task_id, None)
+        entry["stage"] = "已取消"
+        entry["error"] = "用户取消"
+        load_jobs()
+        job = next((j for j in JOBS if j["id"] == entry["job_id"]), None)
+        if job is not None and (job.get("mono") or job.get("dual")):
+            job["status"] = "done"  # 已有成品:取消的只是这次重复翻译,历史不动
+        else:
+            complete_job(entry["job_id"], None, None, entry["model"], "failed")
+        BUS.publish({"type": "task_done", "task": public_task(entry)})
+        return True
     task = RUNNING.pop(task_id, None)
     if task is None:
         return False
