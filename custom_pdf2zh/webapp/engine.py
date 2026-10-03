@@ -356,18 +356,31 @@ LANGS: dict[str, str] = {
     "yue": "粤语",
 }
 
-# BabelDOC 阶段名 → 中文(前缀匹配)
+# BabelDOC 阶段名 → 中文(前缀匹配)。
+# 覆盖内核全部 stage_name(见 babeldoc/format/pdf/high_level.py 的阶段权重表),
+# 用户可见的进度文案不允许残留英文;长名放前面,避免 "Parse Page" 抢先吃掉
+# "Parse Page Layout" 这类前缀重叠的键。
 STAGE_ZH: dict[str, str] = {
+    "Parse PDF and Create Intermediate Representation": "解析 PDF 并重建文档结构",
+    "Automatic Term Extraction": "自动提取术语",
+    "Generate drawing instructions": "组装 PDF 页面",
+    "Parse Formulas and Styles": "解析公式与样式",
+    "Parse Page Layout": "解析页面版面",
+    "Translate Paragraphs": "翻译段落",
+    "Parse Paragraphs": "解析段落",
+    "Remove Char Descent": "清理字符下延",
+    "DetectScannedFile": "检测扫描件",
     "Download assets": "下载排版资源",
+    "Add Debug Information": "写入调试信息",
     "Loading fonts": "加载字体",
+    "Parse Table": "解析表格",
+    "Subset font": "字体子集化",
+    "Warmup": "引擎预热",
+    "Add Fonts": "嵌入字体",
     "Parse layout": "解析版面",
     "Parse Page": "解析页面",
-    "Parse Formulas and Styles": "解析公式与样式",
-    "Translate Paragraphs": "翻译段落",
     "Typesetting": "排版合成",
-    "Subset font": "字体子集化",
     "Save PDF": "保存 PDF",
-    "Warmup": "引擎预热",
 }
 
 # ---------------------------------------------------------------------------
