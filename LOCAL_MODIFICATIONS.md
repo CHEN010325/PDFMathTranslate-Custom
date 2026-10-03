@@ -37,6 +37,15 @@ the items below (upstream changes may conflict or make a patch obsolete).
 - **残留已知限制**:BabelDOC 对超复杂表格(跨页续表、多级表头)偶发
   单元格错位(如 p25 "D.2.1.8" 错入闪点列),属内核表格还原精度
   上限,非本层可修;密集表格文档建议开"自动术语表提取"或换更强模型。
+- **终审补充(同日)**:
+  1. finally 清理烘焙副本在 Windows 下会被内核残留句柄顶掉
+     (ignore_errors 静默失败,实测留下 rotbake/<task_id> 残目录),
+     新增 `engine.purge_rotbake()` 在服务启动、单实例锁之后整目录
+     兜底清理——此刻必然无在跑任务,删除安全;
+  2. 密集表格缺陷的运维处置实录:对问题页单页重翻(ignore_cache
+     重掷,批次组合变化可消 {v} 残留与错位)+ pymupdf 红除清理
+     2pt 微缩残片(只删文字不动表格线)+ 按页合并回成品,全程
+     Hunyuan-MT-7B 实测有效,无需更换模型。
 
 ## 2026-10-03 — 修复:拖放一次却上传两遍(任务列表出现两个相同任务)
 

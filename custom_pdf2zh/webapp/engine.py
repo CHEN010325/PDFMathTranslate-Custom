@@ -749,6 +749,17 @@ def bake_page_rotation(pdf_path: Path, task_id: str) -> tuple[Path, int]:
         return pdf_path, 0
 
 
+def purge_rotbake() -> None:
+    """启动兜底: 清掉旋转页烘焙副本目录(见 bake_page_rotation 文档)。
+
+    _run 的 finally 已尽力即时清理, 但 Windows 上内核进程偶仍短暂持有
+    副本句柄, rmtree(ignore_errors=True) 会静默失败留下残留。烘焙副本
+    只在任务运行期有用, 而本函数在单实例锁之后调用——此刻必然没有
+    在跑的任务, 整目录删除是安全的。
+    """
+    shutil.rmtree(LIBRARY_ROOT / "_sidecache" / "rotbake", ignore_errors=True)
+
+
 def start_translation(pdf_path: Path, settings: dict) -> str:
     task_id = hashlib.sha1(f"{pdf_path}|{time.time_ns()}".encode()).hexdigest()[:12]
     input_rel = to_rel(pdf_path)

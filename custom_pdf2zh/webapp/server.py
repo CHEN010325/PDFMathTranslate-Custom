@@ -387,6 +387,8 @@ def main() -> None:
     engine.ensure_all_exports()
     # 启动清理:旧版平铺页面缓存 + 源文件已消失的派生视图缓存
     engine.purge_orphan_cache()
+    # 兜底清理:上次运行因文件锁未删净的旋转页烘焙副本
+    engine.purge_rotbake()
     print(f"PDF 翻译工作台: {url}", flush=True)
     threading_timer(port, url)
     # SSE 是长连接,优雅停机最多等 3 秒就强制断开,保证"关闭服务"能退干净
