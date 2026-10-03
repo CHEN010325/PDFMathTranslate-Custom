@@ -1,7 +1,10 @@
 version: 2
+# 仓库严格只保留 main 分支: Dependabot 自动开分支发 PR 会违反该约定,
+# 因此 open-pull-requests-limit 置 0 停用版本更新 PR, 依赖升级由人工在 main 上进行。
 updates:
   - package-ecosystem: github-actions
     directory: "/"
+    open-pull-requests-limit: 0
     schedule:
       interval: weekly
   # - package-ecosystem: pip
@@ -14,6 +17,7 @@ updates:
   #     interval: weekly
   - package-ecosystem: pip
     directory: "/"
+    open-pull-requests-limit: 0
     schedule:
       interval: weekly
     versioning-strategy: lockfile-only
