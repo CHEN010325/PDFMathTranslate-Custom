@@ -5,6 +5,39 @@ This repository carries local customizations on top of
 Rebase this branch onto `upstream/main` after pulling updates, then re-check
 the items below (upstream changes may conflict or make a patch obsolete).
 
+## 2026-10-03 — 修复:旋转页(横向大表格)译文渲染错乱 + LLM 占位符残留
+
+- **现象**:FMDS0729(148 页)译文中,源 PDF 全部 23 个 `/Rotate 90`
+  横向表格页(11-14、22、25-29、31-32、38、40-43、45-49、54)渲染
+  错乱:内容挤压、文字竖排乱流、表格裁切。另:第 11/25 页出现
+  `{v1}°F {v2}.5加仑` 式占位符乱码、单元格错位。
+- **根因(两层)**:
+  1. BabelDOC 内核不处理 `/Rotate` 标记——MediaBox 竖版 612×792 +
+     Rotate 90 的页,内核按竖版坐标解析重排,但输出保留旋转标记,
+     视觉与坐标空间错位,横向页全毁;
+  2. 内核发给 LLM 的提示词只示例了 `{1}` 占位符,而 babeldoc 实际
+     掩码是 `{v0}/{v1}` 风格,提示词与实际不符,7B 级翻译模型
+     (Hunyuan-MT-7B)在密集表格行上偶发改写/丢失掩码(全文档 4 处)。
+- **修复(三项)**:
+  1. `engine.py` 新增 `bake_page_rotation()`:翻译前用 pymupdf
+     `remove_rotation()` 把旋转烘进页面内容(去掉 /Rotate,页面变成
+     无标记真横向页),内核即可正常解析;输出文件名不变,工作台预览
+     仍用原文件;失败退回原文件不阻塞。烘焙副本放
+     `_sidecache/rotbake/<task_id>/`(scan_library 跳过该目录,否则
+     散件扫描会把副本误显示成第二条任务),`_run` 的 finally 清理;
+  2. 新补丁 `patches/pdf2zh-next-llm-placeholder-prompt.patch`:
+     `base_translator.prompt()` 增补"占位符({v0}/{v1}/{v2}/{1})必须
+     原样保留、不得改写合并丢弃"指令,所有 LLM 引擎受益。子模块升级
+     后需随其他补丁一并重放(`patches/apply_patches.sh`);
+  3. 烘焙副本入 `_sidecache` + 用后即删,杜绝任务列表幽灵行。
+- **实测**:烘焙 4 页样本经内核翻译后,横向布局/表格结构/中文横排
+  全部正确(对照修复前同页全毁);提示词补丁后 `{v` 残留 4 处 → 0,
+  `>6.5加仑 (25升)` 等数字正确回填。148 页全文重译 16 分钟,视觉
+  验收旋转页代表页(p11/p22/p25 + 对照版 p11)通过。
+- **残留已知限制**:BabelDOC 对超复杂表格(跨页续表、多级表头)偶发
+  单元格错位(如 p25 "D.2.1.8" 错入闪点列),属内核表格还原精度
+  上限,非本层可修;密集表格文档建议开"自动术语表提取"或换更强模型。
+
 ## 2026-10-03 — 修复:拖放一次却上传两遍(任务列表出现两个相同任务)
 
 - **现象**:把 PDF 拖进"选择文档开始翻译"区,一次操作在"最近任务"出

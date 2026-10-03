@@ -1,0 +1,12 @@
+diff --git a/pdf2zh_next/translator/base_translator.py b/pdf2zh_next/translator/base_translator.py
+index f8e20bc..ed5804f 100644
+--- a/pdf2zh_next/translator/base_translator.py
++++ b/pdf2zh_next/translator/base_translator.py
+@@ -183,6 +183,6 @@ class BaseTranslator(ABC):
+         return [
+             {
+                 "role": "user",
+-                "content": f"You are a professional,authentic machine translation engine.\n\n;; Treat next line as plain text input and translate it into {self.lang_out}, output translation ONLY. If translation is unnecessary (e.g. proper nouns, codes, {'{{1}}, etc. '}), return the original text. NO explanations. NO notes. Input:\n\n{text}",
++                "content": f"You are a professional,authentic machine translation engine.\n\n;; Treat next line as plain text input and translate it into {self.lang_out}, output translation ONLY. If translation is unnecessary (e.g. proper nouns, codes, {'{{1}}, etc. '}), return the original text. NO explanations. NO notes. Placeholder tokens in the input, such as {{v0}}, {{v1}}, {{v2}} and {{1}}, MUST be copied to the output exactly as written, each in its original position; never translate, rewrite, merge or drop them. Input:\n\n{text}",
+             },
+         ]

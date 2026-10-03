@@ -719,6 +719,36 @@ def _zh_stage(ev: dict) -> str:
     return stage
 
 
+def bake_page_rotation(pdf_path: Path, task_id: str) -> tuple[Path, int]:
+    """烘焙 /Rotate 旋转页, 返回 (供内核翻译的文件路径, 烘焙页数)。
+
+    BabelDOC 内核对带 /Rotate 标记的横向页(常见于横排大表格)重排错乱:
+    保留旋转标记但内容坐标按未旋转处理, 导致译文挤压、竖排乱流。
+    翻译前用 pymupdf 把旋转烘进页面内容(去掉 /Rotate, 页面变成无标记
+    的真横向页), 内核即可正常解析; 输出文件名用原名保持不变, 工作台
+    预览仍用原文件。烘焙副本放 _sidecache/rotbake/<task_id>/ ——
+    scan_library 明确跳过 _sidecache, 否则散件扫描会把副本误显示成
+    第二条任务卡片; 翻译结束后由 _run 的 finally 清理。
+    烘焙失败时退回原文件, 不阻塞翻译。
+    """
+    try:
+        doc = pymupdf.open(pdf_path)
+        rotated = sum(1 for p in doc if p.rotation)
+        if not rotated:
+            doc.close()
+            return pdf_path, 0
+        for p in doc:
+            p.remove_rotation()
+        bake_dir = LIBRARY_ROOT / "_sidecache" / "rotbake" / task_id
+        bake_dir.mkdir(parents=True, exist_ok=True)
+        baked = bake_dir / pdf_path.name
+        doc.save(baked, garbage=3, deflate=True)
+        doc.close()
+        return baked, rotated
+    except Exception:
+        return pdf_path, 0
+
+
 def start_translation(pdf_path: Path, settings: dict) -> str:
     task_id = hashlib.sha1(f"{pdf_path}|{time.time_ns()}".encode()).hexdigest()[:12]
     input_rel = to_rel(pdf_path)
@@ -773,10 +803,13 @@ async def _run(task_id: str, pdf_path: Path, settings: dict) -> None:
         out_dir = LIBRARY_ROOT / f"webapp-{datetime.now():%Y%m%d-%H%M%S}-{task_id}"
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        # 旋转页烘焙(见 bake_page_rotation 文档): 含 /Rotate 页时改喂烘焙副本
+        pdf_for_kernel, baked_pages = bake_page_rotation(pdf_path, task_id)
+
         # 按所选服务构造官方引擎设置(支持全部 translate_engine_type)
         engine_settings = build_engine_settings(settings)
         sm = SettingsModel(translate_engine_settings=engine_settings)
-        sm.basic.input_files = {str(pdf_path)}
+        sm.basic.input_files = {str(pdf_for_kernel)}
         sm.translation.lang_in = settings.get("lang_in", "en")
         sm.translation.lang_out = settings.get("lang_out", "zh")
         sm.translation.output = str(out_dir)
@@ -789,9 +822,11 @@ async def _run(task_id: str, pdf_path: Path, settings: dict) -> None:
         )
 
         entry["stage"] = "启动翻译内核"
+        if baked_pages:
+            log_lines.append(f"检测到 {baked_pages} 个旋转页, 已烘焙为横向页后翻译")
         publish_changed()
 
-        async for ev in do_translate_async_stream(sm, pdf_path):
+        async for ev in do_translate_async_stream(sm, pdf_for_kernel):
             etype = ev.get("type")
             if etype == "progress_start":
                 txt = _zh_stage(ev)
@@ -844,6 +879,8 @@ async def _run(task_id: str, pdf_path: Path, settings: dict) -> None:
         BUS.publish({"type": "task_done", "task": public_task(entry)})
     finally:
         RUNNING.pop(task_id, None)
+        # 烘焙副本用完即弃, 防止散件扫描误认(见 bake_page_rotation 文档)
+        shutil.rmtree(LIBRARY_ROOT / "_sidecache" / "rotbake" / task_id, ignore_errors=True)
         if log_lines:
             BUS.publish({"type": "log", "task_id": task_id, "lines": log_lines})
         TASKS.pop(task_id, None)  # 已落到登记表,内存表即时清理
