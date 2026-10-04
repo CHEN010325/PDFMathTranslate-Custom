@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import webbrowser
 from pathlib import Path
@@ -22,6 +23,7 @@ from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
+from starlette.concurrency import run_in_threadpool
 
 from . import engine
 
@@ -106,6 +108,9 @@ def list_tasks() -> dict:
                 hit["stage"] = payload["stage"]
                 if is_running:
                     hit["status"] = "running"
+                    hit.pop("queue_position", None)  # 运行中不该残留排队位次
+                elif payload.get("queue_position") is not None:
+                    hit["queue_position"] = payload["queue_position"]
         else:
             payload[state_key] = True
             loose_running.append(payload)
@@ -116,15 +121,9 @@ def list_tasks() -> dict:
 async def upload(file: UploadFile = File(...)) -> dict:
     if not (file.filename or "").lower().endswith(".pdf"):
         raise HTTPException(400, "只支持 PDF 文件")
-    engine.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    dest = engine.UPLOAD_DIR / Path(file.filename).name
-    # 防重名:同名加序号
-    n = 2
-    while dest.exists():
-        dest = engine.UPLOAD_DIR / f"{dest.stem}-{n}{dest.suffix}"
-        n += 1
-    dest.write_bytes(await file.read())
-    return {"uploaded": engine.to_rel(dest), "name": dest.stem}
+    data = await file.read()
+    # 哈希计算 + 落盘放线程池:大文件同步写会卡事件循环
+    return await run_in_threadpool(engine._store_upload, file.filename or "", data)
 
 
 @app.get("/api/pdf-info")
@@ -137,16 +136,14 @@ def pdf_info(file: str) -> dict:
 
 @app.get("/api/page")
 async def page(file: str, page: int, zoom: float = 2.0) -> Response:
-    from starlette.concurrency import run_in_threadpool
-
     async with _RENDER_SEM:  # 大 PDF 并发渲染限流,避免请求风暴
         try:
-            data = await run_in_threadpool(engine.render_page, file, page, zoom)
+            data, media = await run_in_threadpool(engine.render_page, file, page, zoom)
         except Exception as exc:
             raise HTTPException(404, str(exc)) from exc
     return Response(
         content=data,
-        media_type="image/png",
+        media_type=media,
         headers={"Cache-Control": "public, max-age=604800"},
     )
 
@@ -168,7 +165,8 @@ def serve_file(path: str, download: int = 0) -> FileResponse:
 async def side_by_side(request: Request) -> dict:
     body = await request.json()
     try:
-        rel = engine.make_side_by_side(body["path"])
+        # 大 PDF 整本重拼要数秒,放线程池,否则进度推送/其他请求全部冻结
+        rel = await run_in_threadpool(engine.make_side_by_side, body["path"])
     except Exception as exc:
         raise HTTPException(500, str(exc)) from exc
     return {"path": rel, "url": f"/api/file?path={quote(rel)}"}
@@ -184,7 +182,8 @@ async def prepare_view(request: Request) -> dict:
             rel = body["path"]
             engine._resolve(rel)  # 校验存在
         else:
-            rel = engine.extract_view(body["path"], which)
+            # 大双语 PDF 选页保存要数秒,放线程池
+            rel = await run_in_threadpool(engine.extract_view, body["path"], which)
     except Exception as exc:
         raise HTTPException(500, str(exc)) from exc
     return {"path": rel}
@@ -255,8 +254,9 @@ def get_settings() -> dict:
 
 @app.post("/api/settings")
 async def set_settings(request: Request) -> dict:
+    # 设置面板发的是全部引擎字段全集:替换式保存,清空的字段真正删除
     body = await request.json()
-    return engine.save_settings(body)
+    return engine.save_settings(body, full_replace=True)
 
 
 @app.get("/api/langs")
@@ -270,30 +270,36 @@ def services() -> dict:
     return {"services": engine.service_registry(), "groups": engine.GROUP_LABELS}
 
 
+def _fetch_ollama_tags(host: str) -> dict:
+    import urllib.request
+
+    req = urllib.request.Request(
+        host.rstrip("/") + "/api/tags", headers={"Accept": "application/json"}
+    )
+    with urllib.request.urlopen(req, timeout=3) as r:
+        return json.loads(r.read())
+
+
 @app.get("/api/ollama-models")
 async def ollama_models() -> dict:
     """读取本地 Ollama 已装模型,失败时返回空列表(前端回退为手填)。
 
     Ollama 对无标签名默认按 :latest 处理,这里统一剥掉后缀避免下拉框重名。
+    HTTP 请求放线程池:Ollama 没启动时会阻塞到 3 秒超时,同步跑在事件
+    循环里会把整个服务(含翻译进度推送)卡住 3 秒。
     """
-    import urllib.request
-
     host = engine.load_settings().get("engine_fields", {}).get(
         "ollama_host", "http://localhost:11434"
     )
     try:
-        req = urllib.request.Request(
-            host.rstrip("/") + "/api/tags", headers={"Accept": "application/json"}
-        )
-        with urllib.request.urlopen(req, timeout=3) as r:
-            data = json.loads(r.read())
-        seen: dict[str, None] = {}
-        for m in data.get("models", []):
-            name = re.sub(r":latest$", "", m["name"], flags=re.IGNORECASE)
-            seen.setdefault(name, None)
-        return {"models": list(seen)}
+        data = await run_in_threadpool(_fetch_ollama_tags, host)
     except Exception:
         return {"models": []}
+    seen: dict[str, None] = {}
+    for m in data.get("models", []):
+        name = re.sub(r":latest$", "", m["name"], flags=re.IGNORECASE)
+        seen.setdefault(name, None)
+    return {"models": list(seen)}
 
 
 # ---------------------------------------------------------------------------
@@ -311,12 +317,24 @@ async def translate(request: Request) -> dict:
             settings[key] = body[key]
     if "auto_extract_glossary" in body:
         settings["auto_extract_glossary"] = bool(body["auto_extract_glossary"])
+    if "no_dual" in body:
+        settings["no_dual"] = bool(body["no_dual"])
+    if "qps" in body:
+        settings["qps"] = body["qps"]
     if isinstance(body.get("engine_fields"), dict):
         for key, value in body["engine_fields"].items():
             if value is None or (isinstance(value, str) and not value.strip()):
                 settings["engine_fields"].pop(key, None)
             else:
                 settings["engine_fields"][key] = value
+    # 本地引擎固定串行:并发数不持久化,切回云引擎时从默认值开始
+    if engine.SERVICE_META.get(engine._norm_engine(settings.get("engine", "")), {}).get(
+        "group"
+    ) == "local":
+        settings["qps"] = None
+    # 翻译即保存:用户调好参数直接点翻译,下次打开不丢(旧版要手点"保存",
+    # 忘了就出现"明明选了别的引擎,第二天又变回去"的困惑)
+    engine.save_settings(settings)
     task_id = engine.start_translation(pdf_path, settings)
     return {"task_id": task_id}
 
@@ -388,12 +406,18 @@ def main() -> None:
         print(f"PDF 翻译工作台已在运行: {url}", flush=True)
         webbrowser.open(url)
         return
-    # 启动回填:历史已完成任务的成品补齐到成品文件夹
-    engine.ensure_all_exports()
+    # 启动回填:历史已完成任务的成品补齐到成品文件夹。
+    # 纯拷贝、可能要很久,放后台线程——旧版同步执行,历史多时明显拖慢开机;
+    # 浏览器侧的关键请求有 fetchJSONRetry 兜底,晚就绪也不影响
+    threading.Thread(
+        target=engine.ensure_all_exports, name="startup-exports", daemon=True
+    ).start()
     # 启动清理:旧版平铺页面缓存 + 源文件已消失的派生视图缓存
     engine.purge_orphan_cache()
     # 兜底清理:上次运行因文件锁未删净的旋转页烘焙副本
     engine.purge_rotbake()
+    # 页面渲染缓存总量超限时按最旧清理(默认上限 2GB)
+    engine.prune_page_cache()
     print(f"PDF 翻译工作台: {url}", flush=True)
     threading_timer(port, url)
     # SSE 是长连接,优雅停机最多等 3 秒就强制断开,保证"关闭服务"能退干净
@@ -410,6 +434,8 @@ def threading_timer(port: int, url: str) -> None:
 
     def _open():
         time.sleep(1.2)
+        if os.environ.get("PDF2ZH_NO_BROWSER"):
+            return  # 自动化测试/开机自启等场景不弹浏览器
         try:
             webbrowser.open(url)
         except Exception:

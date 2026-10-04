@@ -14,8 +14,11 @@ import asyncio
 import hashlib
 import json
 import logging
+import multiprocessing
 import os
 import re
+import shutil
+import threading
 import time
 import types
 import typing
@@ -23,7 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pymupdf
-import shutil
+from starlette.concurrency import run_in_threadpool
 
 LIBRARY_ROOT = Path("pdf2zh_files").resolve()
 UPLOAD_DIR = LIBRARY_ROOT / "_uploads"
@@ -101,6 +104,11 @@ DEFAULT_SETTINGS: dict = {
     # 自动术语表提取(官方 no_auto_extract_glossary 的反向开关):
     # LLM 引擎默认开,保证术语全文一致;本地小模型耗时翻倍,工作台默认关
     "auto_extract_glossary": False,
+    # 段落翻译并发上限。本地引擎由 resolve_qps 强制串行(qps=1);
+    # 此项仅对云服务生效,调到 8~16 往往近线性提速。None = 云服务走内核默认(4)
+    "qps": None,
+    # 仅输出纯译文:跳过双语对照排版,后处理明显更快
+    "no_dual": False,
 }
 
 # ---------------------------------------------------------------------------
@@ -295,6 +303,22 @@ def build_engine_settings(settings: dict):
     return meta.setting_model_type(**kwargs)
 
 
+def resolve_qps(settings: dict, engine_type: str) -> int | None:
+    """段落翻译并发上限:本地引擎一律串行(qps=1),其他引擎取用户设置。
+
+    本地 GPU 推理实测(qps=1 vs qps=8,相近文本量)加速比仅 1.06x——
+    瓶颈在显存带宽,批处理换不来墙钟时间;小显存机器高并发还会撑爆
+    KV cache 触发模型卸载,大幅负优化。云服务瓶颈在客户端并发数,
+    调高才有收益。返回 None = 跟随内核默认(qps=4)。
+    """
+    if SERVICE_META.get(engine_type, {}).get("group") == "local":
+        return 1
+    qps = settings.get("qps")
+    if isinstance(qps, str) and qps.strip().isdigit():
+        qps = int(qps)
+    return qps if isinstance(qps, int) and qps >= 1 else None
+
+
 def display_model(settings: dict) -> str:
     """任务卡片上展示的引擎标识:优先取 *_model 字段,否则用服务中文名。"""
     engine = _norm_engine(settings.get("engine") or "Ollama")
@@ -433,6 +457,14 @@ def load_settings() -> dict:
                 data[key] = saved[key]
         if "auto_extract_glossary" in saved:
             data["auto_extract_glossary"] = bool(saved["auto_extract_glossary"])
+        if "no_dual" in saved:
+            data["no_dual"] = bool(saved["no_dual"])
+        if "qps" in saved:
+            try:
+                qps = int(saved["qps"])
+                data["qps"] = qps if qps >= 1 else None
+            except (TypeError, ValueError):
+                pass
         if isinstance(saved.get("engine_fields"), dict):
             data["engine_fields"].update(
                 {
@@ -450,20 +482,44 @@ def load_settings() -> dict:
     return data
 
 
-def save_settings(settings: dict) -> dict:
+def save_settings(settings: dict, full_replace: bool = False) -> dict:
+    """保存设置。engine_fields 的合并语义分两种:
+
+    - full_replace=True(设置面板保存):前端发的是所有引擎字段的**全集**,
+      以表单为准整体替换——用户清空的字段(如删掉的 API Key)真正从文件
+      里消失,否则"前端删了、后端缺失=保留"会让旧值复活。
+    - full_replace=False(翻译时自动保存):body 只带当前引擎的字段,
+      保持合并,不碰其他引擎已存的配置。
+    """
     merged = load_settings()
     for key in ("engine", "lang_in", "lang_out"):
         if settings.get(key):
             merged[key] = settings[key]
     if "auto_extract_glossary" in settings:
         merged["auto_extract_glossary"] = bool(settings["auto_extract_glossary"])
+    if "no_dual" in settings:
+        merged["no_dual"] = bool(settings["no_dual"])
+    if "qps" in settings:
+        try:
+            qps = int(settings["qps"] or 0)
+            merged["qps"] = qps if qps >= 1 else None
+        except (TypeError, ValueError):
+            merged["qps"] = None
     if isinstance(settings.get("engine_fields"), dict):
-        for key, value in settings["engine_fields"].items():
-            # 空值 = 删除该字段(界面清空 key 保存即清除,留空项走官方默认值)
-            if value is None or (isinstance(value, str) and not value.strip()):
-                merged["engine_fields"].pop(key, None)
-            else:
-                merged["engine_fields"][key] = value
+        if full_replace:
+            cleaned: dict = {}
+            for key, value in settings["engine_fields"].items():
+                if value is None or (isinstance(value, str) and not value.strip()):
+                    continue  # 空值 = 该字段删除
+                cleaned[key] = value
+            merged["engine_fields"] = cleaned
+        else:
+            for key, value in settings["engine_fields"].items():
+                # 空值 = 删除该字段(界面清空 key 保存即清除,留空项走官方默认值)
+                if value is None or (isinstance(value, str) and not value.strip()):
+                    merged["engine_fields"].pop(key, None)
+                else:
+                    merged["engine_fields"][key] = value
     merged["engine"] = _norm_engine(merged.get("engine", "Ollama"))
     LIBRARY_ROOT.mkdir(parents=True, exist_ok=True)
     SETTINGS_FILE.write_text(
@@ -478,6 +534,7 @@ def save_settings(settings: dict) -> dict:
 
 JOBS: list[dict] = []
 _jobs_loaded = False
+_jobs_lock = threading.Lock()  # 启动导出线程与请求线程可能并发首次加载
 
 
 def _norm_base(name: str) -> tuple[str, str]:
@@ -490,21 +547,26 @@ def _norm_base(name: str) -> tuple[str, str]:
     return (name[: -4] if lower.endswith(".pdf") else name), "plain"
 
 
+def _norm_rel(rel: str | None) -> str:
+    return (rel or "").replace("\\", "/").lower()
+
+
 def load_jobs() -> list[dict]:
     global JOBS, _jobs_loaded
-    if _jobs_loaded:
-        return JOBS
-    _jobs_loaded = True
-    if JOBS_FILE.exists():
-        try:
-            JOBS = json.loads(JOBS_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            JOBS = []
-    # 上次运行中途退出留下的僵尸 running 状态 → 按产物情况复位
-    for j in JOBS:
-        if j.get("status") == "running":
-            j["status"] = "done" if (j.get("mono") or j.get("dual")) else "pending"
-    _rebuild_orphan_jobs()
+    with _jobs_lock:
+        if _jobs_loaded:
+            return JOBS
+        _jobs_loaded = True
+        if JOBS_FILE.exists():
+            try:
+                JOBS = json.loads(JOBS_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                JOBS = []
+        # 上次运行中途退出留下的僵尸 running 状态 → 按产物情况复位
+        for j in JOBS:
+            if j.get("status") == "running":
+                j["status"] = "done" if (j.get("mono") or j.get("dual")) else "pending"
+        _rebuild_orphan_jobs()
     return JOBS
 
 
@@ -547,6 +609,10 @@ def _rebuild_orphan_jobs() -> None:
             continue
         name = re.sub(r"\.zh$", "", base, flags=re.IGNORECASE)
         name = re.sub(r"\.no_watermark$", "", name, flags=re.IGNORECASE)
+        # 同名任务已登记:这份产物多半是该任务旧一轮翻译的遗留副本
+        # (旧版重译不清理旧会话目录),收编会变成同文档第二张卡,跳过
+        if any(j.get("name") == name for j in JOBS):
+            continue
         # 尝试关联 _uploads 里的同名原件(登记表启用前完成的翻译)
         input_rel = None
         up = UPLOAD_DIR / f"{name}.pdf"
@@ -593,29 +659,103 @@ def upsert_job_for_input(input_rel: str, name: str) -> dict:
         JOBS.append(job)
     job["status"] = "running"
     save_jobs()
+    invalidate_scan_cache()
     return job
 
 
-def complete_job(job_id: str, mono: str | None, dual: str | None, model: str | None, status: str) -> None:
-    for j in JOBS:
-        if j["id"] == job_id:
-            if mono:
-                j["mono"] = mono
-            if dual:
-                j["dual"] = dual
-            j["model"] = model
-            j["status"] = status
-            j["time"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-            break
+def _discard_stale_output(job_id: str, rel: str | None) -> None:
+    """重译成功后清掉同任务上一轮的旧产物。
+
+    旧产物不再被登记表引用,放着会变成两块赘肉:scan_library 把它当
+    散件显示成同文档第二张卡;磁盘上每重译一次就多一整个会话目录。
+    若它恰好被旧版"收编"成了幽灵登记(无 input 的同名条目),一并移除。
+    只在 status=done 时调用——失败/取消不动旧成品。
+    """
+    if not rel:
+        return
+    norm = _norm_rel(rel)
+    JOBS[:] = [
+        j
+        for j in JOBS
+        if j["id"] == job_id
+        or (_norm_rel(j.get("mono")) != norm and _norm_rel(j.get("dual")) != norm)
+    ]
+    try:
+        p = _resolve(rel)
+    except Exception:
+        return
+    try:
+        purge_derived_cache([p])
+        p.unlink()
+    except OSError:
+        return
+    parent = p.parent
+    if parent != LIBRARY_ROOT and parent.name.startswith("webapp-"):
+        try:
+            next(parent.iterdir())
+        except StopIteration:
+            shutil.rmtree(parent, ignore_errors=True)
+
+
+def complete_job(
+    job_id: str, mono: str | None, dual: str | None, model: str | None, status: str
+) -> None:
+    job = next((j for j in JOBS if j["id"] == job_id), None)
+    if job is None:
+        return
+    if status == "done":
+        # 新成品落位成功,旧一轮的同文档产物就是纯垃圾,先清再换指针
+        for key, new in (("mono", mono), ("dual", dual)):
+            old = job.get(key)
+            if old and (not new or _norm_rel(old) != _norm_rel(new)):
+                _discard_stale_output(job_id, old)
+    if status == "failed" and (job.get("mono") or job.get("dual")):
+        # 重译失败/取消,但历史成品仍在:卡片保持"完成",
+        # 不能让一次失败的重译把有效历史打成"失败"
+        status = "done"
+    if mono:
+        job["mono"] = mono
+    if dual:
+        job["dual"] = dual
+    job["model"] = model
+    job["status"] = status
+    job["time"] = datetime.now().strftime("%Y-%m-%d %H:%M")
     save_jobs()
+    invalidate_scan_cache()
 
 
 # ---------------------------------------------------------------------------
 # 历史库扫描:登记表优先,散文件(导入/无主产物)兜底
+#
+# /api/tasks 由前端 SSE 节流(1s)与轮询兜底(3s)高频调用,而扫描要
+# rglob 整个库并逐文件 stat——历史越多越慢,Windows 上还伴随杀软扫描。
+# 加 1.5s TTL 缓存:登记表/文件变更点主动失效,轮询命中缓存直接返回。
 # ---------------------------------------------------------------------------
+
+_SCAN_TTL = 1.5
+_scan_lock = threading.Lock()
+_scan_cache: tuple[float, list[dict]] | None = None
+
+
+def invalidate_scan_cache() -> None:
+    global _scan_cache
+    with _scan_lock:
+        _scan_cache = None
 
 
 def scan_library() -> list[dict]:
+    global _scan_cache
+    now = time.monotonic()
+    with _scan_lock:
+        if _scan_cache is not None and now - _scan_cache[0] < _SCAN_TTL:
+            return _scan_cache[1]
+    items = _scan_library_impl()
+    with _scan_lock:
+        _scan_cache = (time.monotonic(), items)
+    return items
+
+
+def _scan_library_impl() -> list[dict]:
     load_jobs()
     items: list[dict] = []
     used: set[Path] = set()
@@ -718,6 +858,42 @@ def to_rel(path: Path | str) -> str:
     return str(Path(path).resolve().relative_to(LIBRARY_ROOT))
 
 
+UPLOAD_HASH_FILE = UPLOAD_DIR / "_hashes.json"
+
+
+def _store_upload(filename: str, data: bytes) -> dict:
+    """上传落盘,返回 {uploaded, name, dedup}。
+
+    同一内容的 PDF 反复上传是常见操作(改了设置想重译),按文件名加 -2
+    后缀会制造重复卡片;改为按内容哈希复用既有文件,重译走"重新翻译"语义。
+    哈希索引存 _uploads/_hashes.json,指向已消失文件的条目顺手清掉。
+    """
+    digest = hashlib.sha1(data).hexdigest()
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    index: dict[str, str] = {}
+    if UPLOAD_HASH_FILE.exists():
+        try:
+            index = json.loads(UPLOAD_HASH_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            index = {}
+    hit = index.get(digest)
+    if hit:
+        p = LIBRARY_ROOT / hit
+        if p.exists():
+            return {"uploaded": hit, "name": Path(hit).stem, "dedup": True}
+    dest = UPLOAD_DIR / Path(filename).name
+    n = 2
+    while dest.exists():
+        dest = UPLOAD_DIR / f"{dest.stem}-{n}{dest.suffix}"
+        n += 1
+    dest.write_bytes(data)
+    rel = to_rel(dest)
+    index[digest] = rel
+    index = {k: v for k, v in index.items() if (LIBRARY_ROOT / v).exists()}
+    UPLOAD_HASH_FILE.write_text(json.dumps(index, ensure_ascii=False), encoding="utf-8")
+    return {"uploaded": rel, "name": dest.stem, "dedup": False}
+
+
 def make_side_by_side(rel: str) -> str:
     from ..history_tab import make_side_by_side as _mbs
 
@@ -753,25 +929,92 @@ def page_cache_bucket(src: Path) -> Path:
     return PAGE_CACHE_DIR / hashlib.sha1(str(src).encode()).hexdigest()[:16]
 
 
-def render_page(rel: str, page_no: int, zoom: float = 2.0) -> bytes:
+# 页面渲染缓存总量上限:预览过的每一页都会落盘,不设上限迟早撑爆磁盘。
+# 启动时超限按最旧优先清理(LRU)。
+PAGE_CACHE_MAX_BYTES = 2 * 1024**3
+
+
+def prune_page_cache(max_bytes: int = PAGE_CACHE_MAX_BYTES) -> int:
+    """按总量清理页面渲染缓存,返回删除的文件数。"""
+    if not PAGE_CACHE_DIR.exists():
+        return 0
+    files: list[Path] = []
+    for f in PAGE_CACHE_DIR.rglob("*"):
+        try:
+            if f.is_file():
+                files.append(f)
+        except OSError:
+            continue
+    def _size(f: Path) -> int:
+        try:
+            return f.stat().st_size
+        except OSError:
+            return 0
+    total = sum(_size(f) for f in files)
+    if total <= max_bytes:
+        return 0
+
+    def _mtime(f: Path) -> float:
+        try:
+            return f.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    files.sort(key=_mtime)
+    freed = 0
+    removed = 0
+    for f in files:
+        if total - freed <= max_bytes:
+            break
+        size = _size(f)
+        try:
+            f.unlink()
+            freed += size
+            removed += 1
+        except OSError:
+            continue
+    for d in PAGE_CACHE_DIR.iterdir():
+        if d.is_dir():
+            try:
+                next(d.iterdir())
+            except StopIteration:
+                shutil.rmtree(d, ignore_errors=True)
+            except OSError:
+                pass
+    return removed
+
+
+def render_page(rel: str, page_no: int, zoom: float = 2.0) -> tuple[bytes, str]:
+    """渲染单页预览图,返回 (图片字节, media_type)。
+
+    预览图改用 JPEG(质量 85):扫描件/图片型页面的 PNG 动辄数 MB,
+    JPEG 体积和编码时间都低一个量级,2 倍渲染精度下预览清晰度足够;
+    纯文字页两者体积接近,JPEG 也无感知劣化。返回类型随实际编码回退。
+    """
     src = _resolve(rel)
     bucket = page_cache_bucket(src)
     key = hashlib.sha1(
         f"{src.stat().st_mtime_ns}|{page_no}|{zoom}".encode()
     ).hexdigest()[:24]
-    cache = bucket / f"{key}.png"
+    cache = bucket / f"{key}.jpg"
     if cache.exists():
-        return cache.read_bytes()
+        return cache.read_bytes(), "image/jpeg"
     doc = pymupdf.open(src)
     try:
         page = doc.load_page(page_no - 1)
         pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
-        data = pix.tobytes("png")
+        try:
+            data = pix.tobytes("jpg", jpg_quality=85)
+            media = "image/jpeg"
+        except Exception:  # 个别色彩空间的 pixmap 编不了 JPEG,回退 PNG
+            data = pix.tobytes("png")
+            cache = bucket / f"{key}.png"
+            media = "image/png"
     finally:
         doc.close()
     bucket.mkdir(parents=True, exist_ok=True)
     cache.write_bytes(data)
-    return data
+    return data, media
 
 
 # ---------------------------------------------------------------------------
@@ -843,6 +1086,7 @@ def start_translation(pdf_path: Path, settings: dict) -> str:
         "status": "queued",
         "progress": 0,
         "stage": "排队中",
+        "queue_position": None,
         "detail": "",
         "input": str(pdf_path),
         "mono": None,
@@ -866,6 +1110,17 @@ def start_translation(pdf_path: Path, settings: dict) -> str:
 
 _QUEUE: asyncio.Queue | None = None
 _WORKER: asyncio.Task | None = None
+_QUEUE_ORDER: list[str] = []  # 排队中的 task_id,按入队顺序 → 前端显示"第 N 位"
+
+
+def _publish_queue_positions() -> None:
+    """把当前各排队任务的位次广播出去(出队/取消后位次前移)。"""
+    for pos, task_id in enumerate(_QUEUE_ORDER, 1):
+        entry = TASKS.get(task_id)
+        if entry is None or entry["status"] != "queued":
+            continue
+        entry["queue_position"] = pos
+        BUS.publish({"type": "task_update", "task": public_task(entry)})
 
 
 def _enqueue_translation(task_id: str) -> None:
@@ -873,13 +1128,24 @@ def _enqueue_translation(task_id: str) -> None:
     if _QUEUE is None:
         _QUEUE = asyncio.Queue()
     _QUEUE.put_nowait(task_id)
+    _QUEUE_ORDER.append(task_id)
+    _publish_queue_positions()
     if _WORKER is None or _WORKER.done():
         _WORKER = asyncio.get_running_loop().create_task(_translation_worker())
+
+
+def _dequeue_order(task_id: str) -> None:
+    try:
+        _QUEUE_ORDER.remove(task_id)
+    except ValueError:
+        pass
+    _publish_queue_positions()
 
 
 async def _translation_worker() -> None:
     while True:
         task_id = await _QUEUE.get()
+        _dequeue_order(task_id)
         entry = TASKS.get(task_id)
         if entry is None or entry["status"] != "queued":
             continue  # 排队期间被取消的任务,直接跳过
@@ -907,6 +1173,7 @@ def cancel_translation(task_id: str) -> bool:
     entry = TASKS.get(task_id)
     if entry is not None and entry["status"] == "queued":
         TASKS.pop(task_id, None)
+        _dequeue_order(task_id)
         entry["stage"] = "已取消"
         entry["error"] = "用户取消"
         load_jobs()
@@ -928,6 +1195,7 @@ async def _run(task_id: str, pdf_path: Path, settings: dict) -> None:
     entry = TASKS[task_id]
     log_lines: list[str] = []
     last_sig: tuple | None = None
+    out_dir: Path | None = None
 
     def publish_changed() -> None:
         nonlocal last_sig
@@ -943,8 +1211,11 @@ async def _run(task_id: str, pdf_path: Path, settings: dict) -> None:
         out_dir = LIBRARY_ROOT / f"webapp-{datetime.now():%Y%m%d-%H%M%S}-{task_id}"
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        # 旋转页烘焙(见 bake_page_rotation 文档): 含 /Rotate 页时改喂烘焙副本
-        pdf_for_kernel, baked_pages = bake_page_rotation(pdf_path, task_id)
+        # 旋转页烘焙(见 bake_page_rotation 文档): 含 /Rotate 页时改喂烘焙副本。
+        # 整本 save 可能数秒,放线程池,避免卡住事件循环(进度推送会冻结)
+        pdf_for_kernel, baked_pages = await run_in_threadpool(
+            bake_page_rotation, pdf_path, task_id
+        )
 
         # 按所选服务构造官方引擎设置(支持全部 translate_engine_type)
         engine_settings = build_engine_settings(settings)
@@ -954,8 +1225,20 @@ async def _run(task_id: str, pdf_path: Path, settings: dict) -> None:
         sm.translation.lang_out = settings.get("lang_out", "zh")
         sm.translation.output = str(out_dir)
         sm.pdf.watermark_output_mode = "no_watermark"  # 商用交付:关闭 BabelDOC 水印行
-        # 自动术语表提取:仅 LLM 引擎可开;非 LLM 引擎内核已强制关闭,勿覆盖
+        # 短行拆段:参考文献类区域条目粘连(编号嵌行中)、链接样式错乱
+        # (删除线/孤立横线)的修复。实测(WeMM 论文 p3/p11/p17):
+        # 参考文献页条目恢复独立成段,正文页与表格页与默认参数逐像素一致,
+        # 无回退,故全局默认开启。
+        sm.pdf.split_short_lines = True
+        # 段落翻译并发:本地引擎一律串行,云服务按用户设置(留空 = 内核默认 4)
         engine_type = engine_settings.model_fields["translate_engine_type"].default
+        qps = resolve_qps(settings, engine_type)
+        if qps is not None:
+            sm.translation.qps = qps
+        # 仅输出纯译文:跳过双语对照排版
+        if settings.get("no_dual"):
+            sm.pdf.no_dual = True
+        # 自动术语表提取:仅 LLM 引擎可开;非 LLM 引擎内核已强制关闭,勿覆盖
         supports_llm = _engine_supports_llm(engine_type)
         sm.translation.no_auto_extract_glossary = not (
             supports_llm and bool(settings.get("auto_extract_glossary", False))
@@ -1000,7 +1283,10 @@ async def _run(task_id: str, pdf_path: Path, settings: dict) -> None:
         entry["stage"] = "完成"
         entry["detail"] = ""
         complete_job(entry["job_id"], entry["mono"], entry["dual"], entry["model"], "done")
-        exported = export_task(entry["name"], entry["mono"], entry["dual"])
+        # 成品拷贝可能上百 MB,放线程池,避免"完成"瞬间卡住所有请求
+        exported = await run_in_threadpool(
+            export_task, entry["name"], entry["mono"], entry["dual"]
+        )
         if exported:
             log_lines.append("成品已导出到: " + str(EXPORT_DIR))
         BUS.publish({"type": "task_done", "task": public_task(entry)})
@@ -1019,8 +1305,20 @@ async def _run(task_id: str, pdf_path: Path, settings: dict) -> None:
         BUS.publish({"type": "task_done", "task": public_task(entry)})
     finally:
         RUNNING.pop(task_id, None)
+        # 内核取消路径只 join(timeout=2),子进程没退出就放任不管——取消的
+        # 翻译会变成孤儿进程继续吃 CPU/GPU(把整份文档翻完),拖垮机器。
+        # 串行队列保证此刻本进程的存活子进程必是当前任务的翻译进程,终止之。
+        for child in multiprocessing.active_children():
+            child.terminate()
         # 烘焙副本用完即弃, 防止散件扫描误认(见 bake_page_rotation 文档)
         shutil.rmtree(LIBRARY_ROOT / "_sidecache" / "rotbake" / task_id, ignore_errors=True)
+        # 失败/取消的任务没有产物,空输出目录不留垃圾(成功的目录由登记表引用)
+        if out_dir is not None and entry["status"] != "done":
+            try:
+                if not any(out_dir.iterdir()):
+                    out_dir.rmdir()
+            except OSError:
+                pass
         if log_lines:
             BUS.publish({"type": "log", "task_id": task_id, "lines": log_lines})
         TASKS.pop(task_id, None)  # 已落到登记表,内存表即时清理
@@ -1154,6 +1452,7 @@ def delete_entries(paths: list[str], job_ids: list[str]) -> int:
         if j.get("status") == "done" and not (j.get("mono") or j.get("dual")):
             j["status"] = "pending" if j.get("input") else j["status"]
     save_jobs()
+    invalidate_scan_cache()
     for d in sorted(parent_dirs):
         try:
             next(d.iterdir())

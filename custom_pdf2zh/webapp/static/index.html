@@ -56,6 +56,19 @@
                 <select id="targetLanguage" name="targetLanguage"></select>
               </label>
               <label
+                title="段落翻译并发上限。云服务(硅基流动/DeepSeek 等)调到 8~16 明显提速;本地模型固定串行,不显示此项。留空走默认 4。"
+              >
+                <span>翻译并发数</span>
+                <input id="qps" name="qps" type="number" min="1" max="64" placeholder="默认 4" />
+              </label>
+              <label
+                class="toggle-field"
+                title="只输出纯译文 PDF,跳过双语对照排版,翻译后处理明显更快。需要对照版时取消勾选。"
+              >
+                <input id="noDual" type="checkbox" />
+                <span>仅输出纯译文(更快)</span>
+              </label>
+              <label
                 class="toggle-field"
                 title="翻译前先用大模型提取全文术语，保证同一术语全文翻译一致。本地小模型建议关闭（可省近一半时间）。"
               >
@@ -149,6 +162,6 @@
     </div>
 
     <input id="file-input" type="file" accept="application/pdf,.pdf" multiple hidden />
-    <script type="module" src="/static/app.mjs?v=6"></script>
+    <script type="module" src="/static/app.mjs?v=10"></script>
   </body>
 </html>

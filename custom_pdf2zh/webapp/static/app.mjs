@@ -115,6 +115,8 @@ async function initSettings() {
   }
 
   $("autoExtractGlossary").checked = !!state.settings.auto_extract_glossary;
+  $("noDual").checked = !!state.settings.no_dual;
+  $("qps").value = state.settings.qps ?? "";
 
   renderEngineSelect();
   renderEngineFields();
@@ -155,6 +157,7 @@ function renderEngineSelect() {
     renderEngineFields();
     updateServicePill();
     if (sel.value === "Ollama") refreshOllamaModels();
+    autoSaveSettings(); // 切引擎即记忆:当前引擎与各引擎已填字段一起落盘
   };
 }
 
@@ -180,6 +183,7 @@ function renderEngineFields() {
     input.placeholder = f.default || (f.secret ? "sk-…" : "");
     input.autocomplete = "off";
     input.spellcheck = false;
+    input.addEventListener("input", autoSaveSettings);
     if (f.secret) input.type = "password";
     // Ollama 模型:本地模型列表可用时渲染真下拉,连不上才回退手填
     if (svc.type === "Ollama" && f.name === "ollama_model" && state.ollamaModels.length) {
@@ -201,6 +205,7 @@ function renderEngineFields() {
         sel.append(o);
       }
       sel.value = match || cur || state.ollamaModels[0];
+      sel.addEventListener("change", autoSaveSettings);
       label.append(span, sel);
       box.append(label);
       continue;
@@ -243,6 +248,19 @@ function updateServicePill() {
   const svc = state.services.find((s) => s.type === $("engine").value);
   pill.textContent = svc ? svc.label : "引擎检测中…";
   pill.classList.add("ok");
+  syncQpsField();
+}
+
+/* 本地引擎固定串行(GPU 批处理实测无收益,小显存机器高并发反而变慢):
+   并发设置项整行隐藏,只有云服务才显示。 */
+function syncQpsField() {
+  const svc = state.services.find((s) => s.type === $("engine").value);
+  const local = svc?.group === "local";
+  const label = $("qps").closest("label");
+  if (!label) return;
+  label.style.display = local ? "none" : "";
+  $("qps").placeholder = local ? "本地模型固定串行" : "默认 4";
+  if (local) $("qps").value = "";
 }
 
 /* 与后端 display_model 对齐:任务卡片/翻译中标题上展示的引擎标识 */
@@ -260,17 +278,31 @@ function currentSettings() {
     lang_in: $("sourceLanguage").value,
     lang_out: $("targetLanguage").value,
     auto_extract_glossary: $("autoExtractGlossary").checked,
+    no_dual: $("noDual").checked,
+    qps: $("qps").value ? Number($("qps").value) : null,
   };
 }
 
-async function saveSettings() {
+async function saveSettings(silent = false) {
   state.settings = await fetchJSON("/api/settings", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(currentSettings()),
   });
   state.draftFields = { ...(state.settings.engine_fields || {}) };
-  toast("设置已保存");
+  if (!silent) toast("设置已保存");
+}
+
+/* 设置自动记忆:任何变更(引擎/模型/密钥/语言/开关)停止输入 1.2 秒后
+   静默落盘。各引擎字段名全局唯一,共用一份 engine_fields 互不覆盖,
+   因此每个供应商的配置(含模型)都各自记住——下次切换回来直接回填,
+   刷新页面、重启服务也不丢。手动「保存」按钮保留,提供即时确认。 */
+let autoSaveTimer = null;
+function autoSaveSettings() {
+  clearTimeout(autoSaveTimer);
+  autoSaveTimer = setTimeout(() => {
+    saveSettings(true).catch((e) => console.error("auto-save settings failed:", e));
+  }, 1200);
 }
 
 /* 关闭服务:有任务在跑/在排队先提示;关闭成功后冻结页面,提示用户关闭标签页 */
@@ -304,7 +336,10 @@ async function shutdownService() {
 async function refreshTasks(force = false) {
   const data = await fetchJSON("/api/tasks");
   const sig = JSON.stringify([
-    data.tasks.map((t) => [t.id, t.time, t.status, t.running ? t.progress : null]),
+    data.tasks.map((t) => [
+      t.id, t.time, t.status,
+      (t.running || t.queued) ? `${t.stage}|${t.progress}|${t.queue_position ?? ""}` : null,
+    ]),
     data.running.map((t) => [t.id, t.progress, t.stage]),
   ]);
   state.tasks = data.tasks;
@@ -314,15 +349,92 @@ async function refreshTasks(force = false) {
   }
 }
 
+/* 卡片键 = 身份 + 形态(运行/排队/失败/完成/待处理)。
+   形态不变时只就地更新文字与样式,不重建 DOM —— 列表每秒刷新,
+   重建会让悬停态闪烁、慢机器上布局抖动;形态变化才整体重排。 */
+function taskCardKey(it) {
+  const running = !!it.running;
+  const queued = !running && !!it.queued;
+  const shape = running ? "running"
+    : queued ? "queued"
+    : it.status === "failed" ? "failed"
+    : it.translated ? "done" : "pending";
+  return `${it.id || `${it.name}|${it.time}`}::${shape}`;
+}
+
+function buildTaskCard(it) {
+  const card = document.createElement("div");
+  card.dataset.key = taskCardKey(it);
+
+  const icon = document.createElement("div");
+  icon.className = "task-icon";
+  icon.textContent = "PDF";
+
+  const main = document.createElement("div");
+  main.className = "task-main";
+  const nm = document.createElement("div");
+  nm.className = "task-name";
+  nm.textContent = it.name;
+  nm.title = it.name;
+  const meta = document.createElement("div");
+  meta.className = "task-meta";
+  main.append(nm, meta);
+
+  const stateEl = document.createElement("div");
+  stateEl.className = "task-state";
+
+  const actions = document.createElement("div");
+  actions.className = "task-actions";
+  card.append(icon, main, stateEl, actions);
+  fillTaskCard(card, it);
+  card.onclick = () => (it.running ? focusRunning(it) : openTask(it));
+  return card;
+}
+
+function fillTaskCard(card, it) {
+  const running = !!it.running;
+  const queued = !running && !!it.queued;
+  card.className = `task-item status-${running ? "running" : it.status === "failed" ? "failed" : it.translated ? "done" : "pending"}`;
+  if (state.activeTask && it.id && state.activeTask.id === it.id) card.classList.add("active");
+  else card.classList.remove("active");
+
+  card.querySelector(".task-name").textContent = it.name;
+  card.querySelector(".task-name").title = it.name;
+  card.querySelector(".task-meta").textContent = running
+    ? `${it.stage || ""} · ${it.progress ?? 0}%`
+    : `${it.time} · ${it.kind}`;
+  card.querySelector(".task-state").textContent = running
+    ? "运行中"
+    : queued
+      ? `排队中${it.queue_position ? `(第 ${it.queue_position} 位)` : ""}`
+      : it.status === "failed" ? "失败" : it.translated ? "完成" : "待处理";
+
+  const actions = card.querySelector(".task-actions");
+  if (!running && !actions.childElementCount) {
+    const retry = document.createElement("button");
+    retry.className = "task-action";
+    retry.textContent = "↻";
+    retry.title = "重新翻译";
+    retry.disabled = !it.original;
+    retry.onclick = (e) => { e.stopPropagation(); retranslate(it); };
+    const del = document.createElement("button");
+    del.className = "task-action danger";
+    del.textContent = "×";
+    del.title = "删除历史和输出文件";
+    del.onclick = (e) => { e.stopPropagation(); deleteTask(it); };
+    actions.append(retry, del);
+  }
+}
+
 function renderTaskList() {
   const listEl = $("task-list");
-  listEl.innerHTML = "";
 
   const items = state.tasks
     .filter((t) => t.name.toLowerCase().includes(state.search.toLowerCase()))
     .filter((t) => (state.filter === "done" ? t.status === "done" && t.translated : true));
 
   if (!items.length) {
+    listEl.innerHTML = "";
     const empty = document.createElement("div");
     empty.className = "task-empty";
     empty.textContent = state.search ? "没有匹配的文件。" : "上传文档后会出现在这里。";
@@ -330,54 +442,21 @@ function renderTaskList() {
     return;
   }
 
-  for (const it of items) {
-    const running = !!it.running;
-    const queued = !running && !!it.queued;
-    const card = document.createElement("div");
-    card.className = `task-item status-${running ? "running" : it.status === "failed" ? "failed" : it.translated ? "done" : "pending"}`;
-    if (state.activeTask && it.id && state.activeTask.id === it.id) card.classList.add("active");
+  const keys = items.map(taskCardKey);
+  const oldKeys = [...listEl.children]
+    .map((el) => el.dataset?.key)
+    .filter(Boolean);
+  const sameShape =
+    oldKeys.length === keys.length && keys.every((k, i) => k === oldKeys[i]);
 
-    const icon = document.createElement("div");
-    icon.className = "task-icon";
-    icon.textContent = "PDF";
-
-    const main = document.createElement("div");
-    main.className = "task-main";
-    const nm = document.createElement("div");
-    nm.className = "task-name";
-    nm.textContent = it.name;
-    nm.title = it.name;
-    const meta = document.createElement("div");
-    meta.className = "task-meta";
-    meta.textContent = running
-      ? `${it.stage || ""} · ${it.progress ?? 0}%`
-      : `${it.time} · ${it.kind}`;
-    main.append(nm, meta);
-
-    const stateEl = document.createElement("div");
-    stateEl.className = "task-state";
-    stateEl.textContent = running ? "运行中" : queued ? "排队中" : it.status === "failed" ? "失败" : it.translated ? "完成" : "待处理";
-
-    const actions = document.createElement("div");
-    actions.className = "task-actions";
-    if (!running) {
-      const retry = document.createElement("button");
-      retry.className = "task-action";
-      retry.textContent = "↻";
-      retry.title = "重新翻译";
-      retry.disabled = !it.original;
-      retry.onclick = (e) => { e.stopPropagation(); retranslate(it); };
-      const del = document.createElement("button");
-      del.className = "task-action danger";
-      del.textContent = "×";
-      del.title = "删除历史和输出文件";
-      del.onclick = (e) => { e.stopPropagation(); deleteTask(it); };
-      actions.append(retry, del);
-    }
-
-    card.append(icon, main, stateEl, actions);
-    card.onclick = () => (running ? focusRunning(it) : openTask(it));
-    listEl.append(card);
+  if (sameShape) {
+    // 形态未变:逐卡就地更新(进度/阶段/位次/激活态),不重建
+    [...listEl.children].forEach((card, i) => fillTaskCard(card, items[i]));
+  } else {
+    listEl.innerHTML = "";
+    const frag = document.createDocumentFragment();
+    for (const it of items) frag.append(buildTaskCard(it));
+    listEl.append(frag);
   }
 }
 
@@ -418,40 +497,67 @@ async function renderPdfList(container, relPath) {
 }
 
 /* 按页锚定同步:src 滚到第 idx 页的第 frac 处,dst 对齐到同一页同一位置。
-   两侧页数不一致时按比例映射页序号。 */
+   两侧页数不一致时按比例映射页序号。
+   页偏移缓存:img 用 aspect-ratio 占位,页面高度在渲染后就稳定,
+   滚动时直接查缓存的 offsetTop,避免每次滚事件全量 querySelectorAll +
+   逐页读 offsetTop 造成强制重排(大 PDF 滚动卡顿的根源)。 */
+let layoutEpoch = 0;
+let resizeTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => layoutEpoch++, 200);
+});
+
+const offsetCache = new WeakMap(); // container -> {epoch, gen, pages, tops}
+
+function getPageMap(container) {
+  const gen = container.dataset.renderGen || "";
+  const hit = offsetCache.get(container);
+  if (hit && hit.epoch === layoutEpoch && hit.gen === gen) return hit;
+  const pages = [...container.querySelectorAll(".pdf-page")];
+  const entry = { epoch: layoutEpoch, gen, pages, tops: pages.map((p) => p.offsetTop) };
+  offsetCache.set(container, entry);
+  return entry;
+}
+
 function pageAnchoredSync(src, dst) {
-  const srcPages = src.querySelectorAll(".pdf-page");
-  const dstPages = dst.querySelectorAll(".pdf-page");
-  if (!srcPages.length || !dstPages.length) return;
+  const sm = getPageMap(src);
+  const dm = getPageMap(dst);
+  if (!sm.pages.length || !dm.pages.length) return;
   const top = src.scrollTop + 4;
-  let idx = 0;
-  for (let i = 0; i < srcPages.length; i++) {
-    if (srcPages[i].offsetTop <= top) idx = i;
-    else break;
+  let lo = 0, hi = sm.pages.length - 1, idx = 0;
+  while (lo <= hi) { // 二分找当前页
+    const mid = (lo + hi) >> 1;
+    if (sm.tops[mid] <= top) { idx = mid; lo = mid + 1; } else hi = mid - 1;
   }
-  const sp = srcPages[idx];
-  const frac =
-    sp.offsetHeight > 0
-      ? Math.min(1, Math.max(0, (top - sp.offsetTop) / sp.offsetHeight))
-      : 0;
+  const spTop = sm.tops[idx];
+  const spH = (idx + 1 < sm.pages.length ? sm.tops[idx + 1] - spTop : sm.pages[idx].offsetHeight);
+  const frac = spH > 0 ? Math.min(1, Math.max(0, (top - spTop) / spH)) : 0;
   const di = Math.min(
-    dstPages.length - 1,
-    Math.round((idx * (dstPages.length - 1)) / Math.max(1, srcPages.length - 1))
+    dm.pages.length - 1,
+    Math.round((idx * (dm.pages.length - 1)) / Math.max(1, sm.pages.length - 1))
   );
-  const dp = dstPages[di];
+  const dpTop = dm.tops[di];
+  const dpH = (di + 1 < dm.pages.length ? dm.tops[di + 1] - dpTop : dm.pages[di].offsetHeight);
   dst.scrollTop = Math.max(
     0,
-    Math.min(dst.scrollHeight - dst.clientHeight, dp.offsetTop + frac * dp.offsetHeight - 4)
+    Math.min(dst.scrollHeight - dst.clientHeight, dpTop + frac * dpH - 4)
   );
 }
 
 function bindSyncScroll(a, b) {
   let driver = null;
   let timer = null;
+  let raf = 0;
   const make = (src, dst) => () => {
     if (driver && driver !== src) return; // 对方正在驱动,忽略自身被程序滚动的回声
     driver = src;
-    pageAnchoredSync(src, dst);
+    if (!raf) {
+      raf = requestAnimationFrame(() => { // 滚动事件合并到帧,一帧至多同步一次
+        raf = 0;
+        pageAnchoredSync(src, dst);
+      });
+    }
     clearTimeout(timer);
     timer = setTimeout(() => (driver = null), 90);
   };
@@ -472,52 +578,58 @@ async function openTask(entry) {
   $("source-title").textContent = entry.name;
   $("result-title").textContent = entry.translated ? "已生成" : "尚未翻译";
 
-  try {
-    let srcRel = entry.original;
-    if (!srcRel && entry.dual) {
-      srcRel = (await fetchJSON("/api/prepare-view", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: entry.dual, which: "原文" }),
-      })).path;
+  // 双栏并行渲染:串行时大 PDF 要等两倍时间才见首屏
+  const renderSource = (async () => {
+    try {
+      let srcRel = entry.original;
+      if (!srcRel && entry.dual) {
+        srcRel = (await fetchJSON("/api/prepare-view", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: entry.dual, which: "原文" }),
+        })).path;
+      }
+      if (seq !== viewSeq) return; // 期间用户切换了视图,本次作废
+      if (srcRel) {
+        $("source-empty").hidden = true;
+        $("source-preview").hidden = false;
+        await renderPdfList($("source-preview"), srcRel);
+        if (seq !== viewSeq) return;
+        $("source-meta").textContent = "PDF · 原文";
+      }
+    } catch (e) {
+      appendLog(`原文预览失败: ${e.message}`);
     }
-    if (seq !== viewSeq) return; // 期间用户切换了视图,本次作废
-    if (srcRel) {
-      $("source-empty").hidden = true;
-      $("source-preview").hidden = false;
-      await renderPdfList($("source-preview"), srcRel);
-      if (seq !== viewSeq) return;
-      $("source-meta").textContent = "PDF · 原文";
-    }
-  } catch (e) {
-    appendLog(`原文预览失败: ${e.message}`);
-  }
+  })();
 
-  try {
-    let outRel = entry.mono;
-    if (!outRel && entry.dual) {
-      outRel = (await fetchJSON("/api/prepare-view", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: entry.dual, which: "译文" }),
-      })).path;
+  const renderResult = (async () => {
+    try {
+      let outRel = entry.mono;
+      if (!outRel && entry.dual) {
+        outRel = (await fetchJSON("/api/prepare-view", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: entry.dual, which: "译文" }),
+        })).path;
+      }
+      if (seq !== viewSeq) return; // 期间用户切换了视图,本次作废
+      if (outRel) {
+        showResultView("translation");
+        await renderPdfList($("translated-preview"), outRel);
+        if (seq !== viewSeq) return;
+        $("result-empty").hidden = true;
+        $("translated-preview").hidden = false;
+      } else {
+        $("result-empty").textContent = "尚未翻译。可在左侧任务卡片上点 ↻ 开始。";
+        $("result-empty").hidden = false;
+        $("translated-preview").hidden = true;
+      }
+    } catch (e) {
+      appendLog(`译文预览失败: ${e.message}`);
     }
-    if (seq !== viewSeq) return; // 期间用户切换了视图,本次作废
-    if (outRel) {
-      showResultView("translation");
-      await renderPdfList($("translated-preview"), outRel);
-      if (seq !== viewSeq) return;
-      $("result-empty").hidden = true;
-      $("translated-preview").hidden = false;
-    } else {
-      $("result-empty").textContent = "尚未翻译。可在左侧任务卡片上点 ↻ 开始。";
-      $("result-empty").hidden = false;
-      $("translated-preview").hidden = true;
-    }
-  } catch (e) {
-    appendLog(`译文预览失败: ${e.message}`);
-  }
+  })();
 
+  await Promise.all([renderSource, renderResult]);
   if (seq !== viewSeq) return;
   $("open-mono").disabled = !(entry.mono || entry.dual);
   $("open-dual").disabled = !entry.dual;
@@ -554,7 +666,7 @@ async function handleFiles(fileList) {
       form.append("file", f);
       try {
         const up = await fetchJSON("/api/upload", { method: "POST", body: form });
-        toast(`已上传 ${up.name},开始翻译…`, 3000);
+        toast(`已上传 ${up.name}${up.dedup ? "(与已有文件相同,复用原记录)" : ""},开始翻译…`, 3000);
         await startTranslate(up.uploaded, up.name);
       } catch (e) {
         appendLog(`上传失败 ${f.name}: ${e.message}`);
@@ -717,6 +829,8 @@ function onTaskUpdate(task) {
   throttledRefresh();
 }
 
+let sseConnected = false;
+
 function connectSSE() {
   const es = new EventSource("/api/events");
   es.addEventListener("task_update", (ev) => onTaskUpdate(JSON.parse(ev.data).task));
@@ -736,18 +850,20 @@ function connectSSE() {
     });
   });
   es.addEventListener("log", (ev) => JSON.parse(ev.data).lines.forEach(appendLog));
-  es.onerror = () => { /* EventSource 自动重连 */ };
+  // 连接状态喂给轮询:SSE 正常时轮询只做低频对账,断流才高频兜底
+  es.onopen = () => { sseConnected = true; };
+  es.onerror = () => { sseConnected = false; /* EventSource 自动重连 */ };
 }
 
-// SSE 偶发断流时的兜底:每 3 秒对账一次运行状态
+// 轮询兜底:SSE 正常时每 15 秒对账一次(修状态漂移),断流时每 3 秒兜底。
+// 旧版无条件每 3 秒重建列表 DOM,既浪费又造成可见抖动。
 function startPolling() {
+  let ticks = 0;
   setInterval(async () => {
-    const data = await fetchJSON("/api/tasks").catch(() => null);
-    if (!data) return;
-    state.tasks = data.tasks;
-    renderTaskList();
-
-    const run = data.tasks.find((t) => t.running);
+    ticks++;
+    if (sseConnected && ticks % 5 !== 0) return;
+    await refreshTasks().catch(() => null);
+    const run = state.tasks.find((t) => t.running);
     if (run && run.task_id === state.currentTaskId) {
       showProgress(run);
       const sig = `${run.stage}|${run.progress}`;
@@ -767,7 +883,11 @@ function bindUI() {
   $("new-task").onclick = pickFiles;
   $("pick-pdf").onclick = pickFiles;
   $("file-input").onchange = (e) => { handleFiles(e.target.files); e.target.value = ""; };
-  $("save-settings").onclick = saveSettings;
+  $("save-settings").onclick = () => saveSettings();
+  // 设置项变更自动记忆(引擎字段在渲染处单独绑 input)
+  for (const id of ["sourceLanguage", "targetLanguage", "autoExtractGlossary", "noDual", "qps"]) {
+    $(id).addEventListener("change", autoSaveSettings);
+  }
   $("open-output").onclick = () => fetchJSON("/api/open-library", { method: "POST" });
   $("clear-history").onclick = clearAll;
   $("shutdown-service").onclick = shutdownService;
@@ -784,12 +904,12 @@ function bindUI() {
     b.onclick = () => showResultView(b.dataset.resultView);
   });
 
-  // 拖放只绑最外层 #source-viewer: 内层 #source-empty 是它的子元素,
-  // drop 会冒泡上来, 两层都绑会让一次拖放触发两次 handleFiles, 同一文件被传两遍
-  $("source-viewer").addEventListener("dragover", (e) => e.preventDefault());
-  $("source-viewer").addEventListener("drop", (e) => {
+  // 拖放绑全窗口:拖到页面任何位置都能开始翻译,顺带拦掉浏览器
+  // "拖 PDF 进窗口就整页打开"的默认行为(旧版只绑左栏,拖空档处没反应)
+  window.addEventListener("dragover", (e) => e.preventDefault());
+  window.addEventListener("drop", (e) => {
     e.preventDefault();
-    if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
+    if (e.dataTransfer && e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
   });
 
   $("open-mono").onclick = async () => {
