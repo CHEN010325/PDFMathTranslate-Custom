@@ -321,6 +321,8 @@ async def translate(request: Request) -> dict:
         settings["no_dual"] = bool(body["no_dual"])
     if "qps" in body:
         settings["qps"] = body["qps"]
+    if isinstance(body.get("ocr"), dict):
+        settings["ocr"].update(body["ocr"])
     if isinstance(body.get("engine_fields"), dict):
         for key, value in body["engine_fields"].items():
             if value is None or (isinstance(value, str) and not value.strip()):
@@ -334,7 +336,7 @@ async def translate(request: Request) -> dict:
         settings["qps"] = None
     # 翻译即保存:用户调好参数直接点翻译,下次打开不丢(旧版要手点"保存",
     # 忘了就出现"明明选了别的引擎,第二天又变回去"的困惑)
-    engine.save_settings(settings)
+    settings["ocr"] = engine.save_settings(settings)["ocr"]
     task_id = engine.start_translation(pdf_path, settings)
     return {"task_id": task_id}
 

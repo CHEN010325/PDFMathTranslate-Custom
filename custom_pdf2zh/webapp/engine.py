@@ -109,6 +109,7 @@ DEFAULT_SETTINGS: dict = {
     "qps": None,
     # 仅输出纯译文:跳过双语对照排版,后处理明显更快
     "no_dual": False,
+    "ocr": {"engine": "paddle-hybrid", "token": ""},
 }
 
 # ---------------------------------------------------------------------------
@@ -447,6 +448,7 @@ def public_task(entry: dict) -> dict:
 def load_settings() -> dict:
     data = dict(DEFAULT_SETTINGS)
     data["engine_fields"] = dict(DEFAULT_SETTINGS["engine_fields"])
+    data["ocr"] = dict(DEFAULT_SETTINGS["ocr"])
     if SETTINGS_FILE.exists():
         try:
             saved = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
@@ -459,6 +461,10 @@ def load_settings() -> dict:
             data["auto_extract_glossary"] = bool(saved["auto_extract_glossary"])
         if "no_dual" in saved:
             data["no_dual"] = bool(saved["no_dual"])
+        if isinstance(saved.get("ocr"), dict):
+            data["ocr"].update(
+                {k: saved["ocr"][k] for k in ("engine", "token") if k in saved["ocr"]}
+            )
         if "qps" in saved:
             try:
                 qps = int(saved["qps"])
@@ -499,6 +505,15 @@ def save_settings(settings: dict, full_replace: bool = False) -> dict:
         merged["auto_extract_glossary"] = bool(settings["auto_extract_glossary"])
     if "no_dual" in settings:
         merged["no_dual"] = bool(settings["no_dual"])
+    if isinstance(settings.get("ocr"), dict):
+        config = settings["ocr"]
+        name = config.get("engine", merged["ocr"]["engine"])
+        if name not in {"PP-OCRv6", "Tesseract", "paddle-hybrid"}:
+            raise ValueError("不支持的 OCR 引擎")
+        merged["ocr"] = {
+            "engine": name,
+            "token": str(config.get("token", merged["ocr"]["token"]) or "").strip(),
+        }
     if "qps" in settings:
         try:
             qps = int(settings["qps"] or 0)
@@ -1065,7 +1080,7 @@ def bake_page_rotation(pdf_path: Path, task_id: str) -> tuple[Path, int]:
 
 
 def purge_rotbake() -> None:
-    """启动兜底: 清掉旋转页烘焙副本目录(见 bake_page_rotation 文档)。
+    """启动兜底: 清掉旋转页和 OCR 预处理副本目录。
 
     _run 的 finally 已尽力即时清理, 但 Windows 上内核进程偶仍短暂持有
     副本句柄, rmtree(ignore_errors=True) 会静默失败留下残留。烘焙副本
@@ -1073,6 +1088,7 @@ def purge_rotbake() -> None:
     在跑的任务, 整目录删除是安全的。
     """
     shutil.rmtree(LIBRARY_ROOT / "_sidecache" / "rotbake", ignore_errors=True)
+    shutil.rmtree(CACHE_DIR / "ocr", ignore_errors=True)
 
 
 def start_translation(pdf_path: Path, settings: dict) -> str:
@@ -1217,6 +1233,34 @@ async def _run(task_id: str, pdf_path: Path, settings: dict) -> None:
             bake_page_rotation, pdf_path, task_id
         )
 
+        from custom_pdf2zh.workbench_ocr import prepare_pdf, translation_events
+
+        source_for_kernel = pdf_for_kernel
+
+        entry["stage"] = "检查扫描页"
+        publish_changed()
+
+        def ocr_progress(event):
+            entry["stage"] = event["stage"]
+            log_lines.append(event["stage"])
+            publish_changed()
+
+        ocr_result = await prepare_pdf(
+            pdf_for_kernel,
+            CACHE_DIR / "ocr" / task_id / pdf_path.name,
+            settings.get("lang_in", "en"),
+            ocr_progress,
+            ocr_settings=settings.get("ocr", DEFAULT_SETTINGS["ocr"]),
+        )
+        pdf_for_kernel = Path(ocr_result["path"])
+        if ocr_result["pages"]:
+            log_lines.append(
+                f"OCR 已为 {len(ocr_result['pages'])} 页添加文字层；保留原始扫描图像。"
+                "公式、下标和表格数值请对照原文复核。"
+            )
+        if ocr_result["empty_pages"]:
+            log_lines.append(f"OCR 未识别出文字的页（保留原页）：{ocr_result['empty_pages']}")
+
         # 按所选服务构造官方引擎设置(支持全部 translate_engine_type)
         engine_settings = build_engine_settings(settings)
         sm = SettingsModel(translate_engine_settings=engine_settings)
@@ -1249,7 +1293,13 @@ async def _run(task_id: str, pdf_path: Path, settings: dict) -> None:
             log_lines.append(f"检测到 {baked_pages} 个旋转页, 已烘焙为横向页后翻译")
         publish_changed()
 
-        async for ev in do_translate_async_stream(sm, pdf_for_kernel):
+        async for ev in translation_events(
+            sm,
+            source_for_kernel,
+            pdf_for_kernel,
+            ocr_result["pages"],
+            do_translate_async_stream,
+        ):
             etype = ev.get("type")
             if etype == "progress_start":
                 txt = _zh_stage(ev)
@@ -1312,6 +1362,7 @@ async def _run(task_id: str, pdf_path: Path, settings: dict) -> None:
             child.terminate()
         # 烘焙副本用完即弃, 防止散件扫描误认(见 bake_page_rotation 文档)
         shutil.rmtree(LIBRARY_ROOT / "_sidecache" / "rotbake" / task_id, ignore_errors=True)
+        shutil.rmtree(CACHE_DIR / "ocr" / task_id, ignore_errors=True)
         # 失败/取消的任务没有产物,空输出目录不留垃圾(成功的目录由登记表引用)
         if out_dir is not None and entry["status"] != "done":
             try:

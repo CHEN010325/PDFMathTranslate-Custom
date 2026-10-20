@@ -117,6 +117,9 @@ async function initSettings() {
   $("autoExtractGlossary").checked = !!state.settings.auto_extract_glossary;
   $("noDual").checked = !!state.settings.no_dual;
   $("qps").value = state.settings.qps ?? "";
+  $("ocrEngine").value = state.settings.ocr?.engine || "paddle-hybrid";
+  $("ocrToken").value = state.settings.ocr?.token || "";
+  $("ocrTokenField").hidden = $("ocrEngine").value === "Tesseract";
 
   renderEngineSelect();
   renderEngineFields();
@@ -280,6 +283,7 @@ function currentSettings() {
     auto_extract_glossary: $("autoExtractGlossary").checked,
     no_dual: $("noDual").checked,
     qps: $("qps").value ? Number($("qps").value) : null,
+    ocr: { engine: $("ocrEngine").value, token: $("ocrToken").value.trim() },
   };
 }
 
@@ -885,7 +889,10 @@ function bindUI() {
   $("file-input").onchange = (e) => { handleFiles(e.target.files); e.target.value = ""; };
   $("save-settings").onclick = () => saveSettings();
   // 设置项变更自动记忆(引擎字段在渲染处单独绑 input)
-  for (const id of ["sourceLanguage", "targetLanguage", "autoExtractGlossary", "noDual", "qps"]) {
+  $("ocrEngine").addEventListener("change", () => {
+    $("ocrTokenField").hidden = $("ocrEngine").value === "Tesseract";
+  });
+  for (const id of ["sourceLanguage", "targetLanguage", "autoExtractGlossary", "noDual", "qps", "ocrEngine", "ocrToken"]) {
     $(id).addEventListener("change", autoSaveSettings);
   }
   $("open-output").onclick = () => fetchJSON("/api/open-library", { method: "POST" });

@@ -48,6 +48,18 @@
               </label>
               <div id="engine-fields"></div>
               <label>
+                <span>扫描件文字识别</span>
+                <select id="ocrEngine">
+                  <option value="paddle-hybrid">PaddleOCR-VL-1.6 + PP-OCRv6（云端，质量优先）</option>
+                  <option value="PP-OCRv6">PP-OCRv6（云端）</option>
+                  <option value="Tesseract">Tesseract（本地兼容模式）</option>
+                </select>
+              </label>
+              <label id="ocrTokenField">
+                <span>PaddleOCR 访问令牌</span>
+                <input id="ocrToken" type="password" autocomplete="off" placeholder="仅扫描件需要；也可配置服务端环境变量" />
+              </label>
+              <label>
                 <span>源语言</span>
                 <select id="sourceLanguage" name="sourceLanguage"></select>
               </label>

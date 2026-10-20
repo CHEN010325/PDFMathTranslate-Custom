@@ -181,6 +181,8 @@ cython_debug/
 .DS_Store
 uv.lock
 *.pdf
+# Local acceptance artifacts can contain customer documents and rendered pages.
+/output/
 *.docx
 .gradio/
 .mimosa/

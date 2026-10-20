@@ -293,7 +293,60 @@ For docker deployment on cloud service:
 
 <h2 id="usage">4. Technical Details</h2>
 
-### Experimental automatic OCR (fast mode)
+### Automatic OCR
+
+#### Workbench (precise kernel)
+
+The custom workbench automatically recognizes image-only pages with OCR.
+Scan prose uses the configured translation provider and a bounded compositor;
+native-text pages keep the precise kernel and its original rich-text settings.
+Mixed PDFs run these paths separately and merge their original page order.
+
+Workbench OCR defaults to hosted **PaddleOCR-VL-1.6 + PP-OCRv6**: VL supplies
+complete paragraphs, inline formula notation and prose-only table cells;
+PP-OCRv6 supplies word coordinates. Value-bearing data cells retain their
+original numerical pixels. A PP-OCRv6-only mode is available for simpler documents.
+Hybrid mode translates long footnotes as complete paragraphs. Numerical and
+mathematical spans are masked, checked for exact one-to-one preservation and
+restored before typesetting; missing, duplicated or invented values stop export.
+If a long condition fails that check, complete sentences/alternative conditions
+are retried with the same checks. Existing domain terminology is corrected only
+for detected polyethylene piping scans; native translation is unaffected.
+The combined mode submits two recognition jobs. Select the OCR engine
+and enter the PaddleOCR access token in the settings panel, or configure the
+server environment variable `PADDLEOCR_ACCESS_TOKEN` / `PDF2ZH_PADDLEOCR_TOKEN`.
+Retries reuse a completed cloud job bound to the exact file, selected pages,
+model and account token, avoiding duplicate uploads. Job receipts contain no
+token and live under `~/.cache/pdf2zh/paddle-jobs`; unavailable jobs are submitted
+again. Set `PDF2ZH_OCR_REFRESH=1` to explicitly request fresh recognition.
+Only image-only pages are uploaded; native-text PDFs never require the token
+or make OCR requests. Recognition requests explicitly enable `returnWordBox`
+and disable orientation/unwarping so coordinates stay in the original page
+frame. Word boundaries are refined against the scan pixels before erasing ink.
+No PaddlePaddle runtime or local neural model is installed for this path.
+
+The optional **Tesseract** compatibility mode uses PyMuPDF at 300 dpi and downloads
+`tessdata_best` 4.1.0 language data on first use into
+`~/.cache/pdf2zh/tessdata_best/4.1.0`. It needs no extra Python OCR package or
+Tesseract executable. The input language chooses the OCR language;
+`PDF2ZH_OCR_LANGUAGE=eng+deu` overrides it, and `TESSDATA_PREFIX` can point to
+existing local language data for offline use. Downloads and page recognition
+appear in the task progress. Cancelling a job stops its OCR subprocess.
+
+Only an invisible text layer is added to a temporary copy; source images, page
+geometry, links and the uploaded original are preserved. Pages that already have
+text (including existing OCR layers) are skipped. Mixed image/text regions on
+one page are not currently recognized. Standalone symbols, equations and purely
+numerical table cells retain their source pixels. Numerical and unit tokens in
+mixed table cells are also protected from translation and painting. Ruled cells
+boundaries constrain translation; translated prose is fitted
+inside its source area and source-word backgrounds exclude protected values.
+Scan output includes a `scan-audit.json` record of source/target regions.
+OCR can still miss text or misread inline formulas and low-resolution scans:
+a completed translation still needs
+comparison with its original before customer delivery.
+
+#### Fast mode (experimental)
 
 Fast mode automatically runs local OCR on selected image-only pages before
 translation. Native text, existing OCR layers, and blank pages are skipped;
