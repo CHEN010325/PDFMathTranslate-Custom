@@ -11,7 +11,8 @@
 - 🚦 **自动串行队列**:一次拖入多少个 PDF,服务端都自动排队逐个翻译,不并发、不抢资源
 - ⚡ **版面识别自动 GPU 加速**:部署时探测 NVIDIA 显卡,有卡自动启用(单页版面解析约快 27 倍),没卡自动走 CPU;翻译进程整体低优先级,后台跑翻译不卡日常用机
 - 📄 **三视图输出**:纯译文 / 双语对照(逐页交替)/ 左原文右译文对照 PDF
-- 🔌 **翻译引擎随心选**:默认本地 Ollama(文献不出机器),也可一键切换 SiliconFlow、OpenAI、DeepSeek 等云端大模型
+- 🔌 **翻译引擎随心选**:默认本地 Ollama,也可切换 SiliconFlow、OpenAI、DeepSeek 等云端大模型;默认云端 OCR 会上传扫描页用于识别
+- 📷 **扫描件自动识别**:工作台默认使用 PaddleOCR-VL-1.6 + PP-OCRv6,填写访问令牌后自动识别扫描页;原生文字页继续使用原来的精确翻译流程
 - 💧 **无水印**:已关闭 BabelDOC 免费版水印行,交付件干净
 - 🈶 33+ 语言互译,基于腾讯混元 Hy-MT2 翻译模型([模型主页](https://ollama.com/s2021008840/hy-mt2))
 
@@ -20,14 +21,38 @@
 **前提**:Windows 10/11;建议 NVIDIA 显卡(6GB+ 显存,无显卡可跑 CPU 但较慢);已安装 [Git](https://git-scm.com/download/win) 与 [Python 3.10~3.13](https://www.python.org/downloads/)(Ollama 缺失时脚本会自动安装)。
 
 ```bat
-git clone --recursive https://github.com/CHEN010325/PDFMathTranslate-Custom.git
+git clone --branch main --recursive https://github.com/CHEN010325/PDFMathTranslate-Custom.git
 cd PDFMathTranslate-Custom
 script\setup_windows.bat
 ```
 
-脚本会自动完成:**子模块初始化 → 内核虚拟环境(pdf2zh-next 2.9.0 + BabelDOC 0.6.4)→ 按显卡自动安装版面识别 GPU/CPU 组件 → 定制补丁 → Ollama 安装(如缺失)→ 翻译模型下载(约 4.6GB)→ 桌面快捷方式 → 启动工作台**。浏览器自动打开 `http://127.0.0.1:7860`,拖入 PDF 即可翻译。
+脚本会自动完成:**子模块初始化 → 内核虚拟环境 → 工作台与 OCR 依赖安装 → 按显卡安装 GPU/CPU 组件 → 定制补丁 → 扫描排版与原生 PDF 绕过检查 → Ollama 与翻译模型 → 桌面快捷方式 → 启动工作台**。浏览器自动打开 `http://127.0.0.1:7860`。
 
-> 🧪 已在全新克隆上端到端验证。已完成的步骤幂等跳过,失败重跑即可续接。
+扫描件首次使用:在左侧设置中保留默认的「PaddleOCR-VL-1.6 + PP-OCRv6」,填写你自己的 **PaddleOCR 访问令牌**,选择可用的翻译服务,然后拖入 PDF。云端识别需要联网和有效服务额度,无需本地安装 Paddle 模型。原生文字 PDF 无需 OCR 令牌。识别、翻译或排版失败时会显示错误,不会把未完成的文件标成成功。
+
+### 更新已有安装
+
+先在网页右上角点击「关闭服务」,等正在执行的任务结束。在仓库目录运行:
+
+```bat
+script\update_windows.bat
+```
+
+更新器只在 `main` 上执行 `fetch` 和快进更新,然后重跑部署、补齐依赖和补丁、检查扫描件路径并启动工作台。不会创建分支,不会重置或清理本地文件。若检测到工作台仍运行、本地代码修改或未推送提交,会停止并说明原因。已有设置、访问令牌、上传文件和翻译历史保留在内核目录的 `pdf2zh_files` 中。
+
+旧版本若还没有更新脚本,关闭服务后先执行一次:
+
+```bat
+git switch main
+git pull --ff-only origin main
+script\setup_windows.bat
+```
+
+直接重跑旧代码中的部署脚本不会自动拉取主仓库。部署失败可重跑,但必须看到运行检查通过,才算完成。部署日志为仓库根目录的 `setup_log_*.log`。
+
+仅安装、不自动启动可用 `script\setup_windows.bat -NoStart`。已有云端翻译服务、不需要安装 Ollama 时加 `-SkipOllama`;`-SkipAssets` 仅跳过 BabelDOC 资产预下载,首次使用仍需下载。这些参数也适用于更新脚本。可通过 `PDF2ZH_PYTHON` 指定 Python 可执行文件;已存在的内核虚拟环境会优先复用。
+
+> 部署会实际检查依赖导入、扫描页识别路由、中文及公式排版和原生文字页绕过;该离线检查不消耗云端 OCR 额度。云端令牌和翻译服务仍需在实际任务中验证。
 > 默认模型为 `s2021008840/hy-mt2:7b-q4_k_m`(7B Q4 量化,官方实测相比原版权重仅 -0.16 XCOMET);需要更高质量可 `ollama pull s2021008840/hy-mt2:7b-q8_0`。
 > 有 NVIDIA 显卡时 GPU 组件约多下载 1.5GB;`PDF2ZH_NO_GPU=1` 可强制跳过。
 
@@ -37,7 +62,7 @@ script\setup_windows.bat
 |---|---|
 | 日常启动 | 桌面「PDF翻译工作台」快捷方式,或仓库内 `start_workbench.bat`(部署脚本生成) |
 | 关闭服务 | 右上角「关闭服务」按钮(有任务在运行或排队会先拦截);或直接关闭服务控制台窗口 |
-| **升级版本** | `git pull` 后重跑 `script\setup_windows.bat`——全自动、幂等,补丁与 GPU 组件按需自动补齐 |
+| **升级版本** | 关闭工作台后运行 `script\update_windows.bat`,更新 `main` 并重新部署 |
 | 高级参数 GUI(冷门引擎配置) | 运行内核目录下 `.venv\Scripts\pdf2zh_next.exe --gui --server-port 7861` |
 | 引擎升级后恢复定制补丁 | `script\apply_all_patches.py`(幂等,一键重放全部补丁) |
 | 详细改动说明 | 见 [LOCAL_MODIFICATIONS.md](LOCAL_MODIFICATIONS.md) |

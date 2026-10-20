@@ -1,8 +1,11 @@
 ﻿# PDFMathTranslate-Custom 一键部署 (Windows 10/11)
 # 由 script\setup_windows.bat 调用; 也可直接运行:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File script\setup_windows.ps1
+param([switch]$NoStart, [switch]$SkipAssets, [switch]$SkipOllama)
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
 
 $repo   = Split-Path $PSScriptRoot -Parent
 $kernel = Join-Path $repo "pdf2zh\kernel\PDFMathTranslate-next.git"
@@ -10,6 +13,8 @@ $venv   = Join-Path $kernel ".venv"
 $port   = if ($env:PDF2ZH_PORT) { $env:PDF2ZH_PORT } else { "7860" }
 $skipShortcut = [bool]$env:PDF2ZH_SKIP_SHORTCUT
 $skipModel    = [bool]$env:PDF2ZH_SKIP_MODEL
+. (Join-Path $PSScriptRoot "windows_common.ps1")
+Set-Location -LiteralPath $repo
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
@@ -36,6 +41,7 @@ function Fail($msg) {
 }
 
 Log "部署开始"
+try { Assert-WorkbenchStopped $repo } catch { Fail $_.Exception.Message }
 
 # ---- 1. 子模块 ----
 Write-Host "[1/6] 初始化翻译引擎子模块 ..."
@@ -52,9 +58,12 @@ Write-Host "[2/6] 查找 Python (需要 3.10-3.13) ..."
 $snip = "import sys; print('%d.%d' % sys.version_info[:2])"
 $pyExe, $pyArgs, $ver = $null, $null, $null
 foreach ($cand in @(
+    @((Join-Path $venv "Scripts\python.exe"), $null),
+    @($env:PDF2ZH_PYTHON, $null),
     @("py", "-3.12"), @("py", "-3.11"), @("py", "-3.13"), @("py", "-3.10"),
     @("python", $null), @("python3", $null)
 )) {
+    if (-not $cand[0]) { continue }
     try {
         if ($cand[1]) { $ver = & $cand[0] $cand[1] -c $snip 2>$null }
         else { $ver = & $cand[0] -c $snip 2>$null }
@@ -77,7 +86,9 @@ if (-not $pyExe) {
 # ---- 3. venv + 引擎 ----
 Write-Host "[3/6] 创建内核虚拟环境并安装 pdf2zh-next 2.9.0 (约 5 分钟) ..."
 if (-not (Test-Path (Join-Path $venv "Scripts\python.exe"))) {
-    & $pyExe $pyArgs -m venv $venv
+    $pythonArgs = @()
+    if ($pyArgs) { $pythonArgs += $pyArgs }
+    & $pyExe @pythonArgs -m venv $venv
     if ($LASTEXITCODE -ne 0) { Fail "venv 创建失败。" }
 }
 $vp = Join-Path $venv "Scripts\python.exe"
@@ -91,10 +102,10 @@ $mirrors = @(
     "https://pypi.org/simple"
 ) | Where-Object { $_ }
 
-function Install-PipPackage($spec, $desc) {
+function Install-PipPackage([string[]]$spec, $desc) {
     foreach ($m in $mirrors) {
         Log "安装 $desc (源: $m) ..."
-        & $vp -m pip install $spec -i $m
+        & $vp -m pip install @spec -i $m
         if ($LASTEXITCODE -eq 0) { Log "$desc 安装完成"; return }
         Log "源 $m 失败, 自动尝试下一个 ..."
     }
@@ -104,10 +115,9 @@ function Install-PipPackage($spec, $desc) {
 # 幂等保护: 引擎已装好就整段跳过。重跑时若带着"pdf2zh-next 要 pymupdf<1.25.3
 # 而 babeldoc 已把 pymupdf 升级"的已知冲突再执行 pip install, 解析器会试图
 # 降级 pymupdf 修复冲突, 白白下载还可能因镜像 403 而中断
-$haveEngine = (& $vp -m pip show pdf2zh-next 2>$null | Select-String "^Version: 2.9.0")
-$haveBabel = (& $vp -m pip show babeldoc 2>$null | Select-String "^Version: 0.6.4")
-if ($haveEngine -and $haveBabel) {
-    Log "pdf2zh-next 2.9.0 与 babeldoc 0.6.4 均已安装, 跳过引擎安装"
+$haveEngine = & $vp -c "from importlib.metadata import distributions; print(any(d.metadata['Name'].lower() == 'pdf2zh-next' and d.version == '2.9.0' for d in distributions()))"
+if ($LASTEXITCODE -eq 0 -and $haveEngine -eq "True") {
+    Log "pdf2zh-next 2.9.0 已安装, 跳过基础引擎安装"
 } else {
     Log "升级 pip (源: $($mirrors[0])) ..."
     & $vp -m pip install --upgrade pip -i $mirrors[0]
@@ -116,10 +126,12 @@ if ($haveEngine -and $haveBabel) {
     # 与本机验证过的环境一致——先装引擎, 再独立升级 babeldoc(pip 会警告依赖冲突, 属预期)。
     # 不加 -q: 保留 pip 进度条, 客户机网慢时窗口长期无输出会被误认为卡死。
     Install-PipPackage "pdf2zh-next==2.9.0" "pdf2zh-next==2.9.0 及全部依赖 (下载约 0.5GB, 国内镜像一般 1-3 分钟)"
-    Install-PipPackage "babeldoc==0.6.4" "babeldoc==0.6.4 (排版内核)"
     $pkgver = (& $vp -m pip show pdf2zh-next | Select-String "^Version").ToString()
     Log "引擎安装完成: $pkgver"
 }
+# 每次都核对工作台依赖: 不能因引擎版本相同而跳过新增的 OCR 包。
+# 单独安装这组依赖,保留已验证的 BabelDOC/PyMuPDF 组合。
+Install-PipPackage -spec @("-r", (Join-Path $PSScriptRoot "requirements-workbench.txt")) -desc "工作台与扫描件 OCR 依赖"
 
 # ---- 3.5 版面识别 GPU 加速组件(自动探测,可选) ----
 # DocLayout-YOLO 版面模型走 onnxruntime:GPU 版单页约 0.02s,CPU 版约 0.55s(5070 Ti 实测)。
@@ -141,14 +153,15 @@ Log "探测显卡: 决定版面识别用 GPU 还是 CPU"
 if ($env:PDF2ZH_NO_GPU) {
     Write-Host "      按要求跳过 GPU 组件 (PDF2ZH_NO_GPU=1), 版面识别走 CPU。"
 } elseif (Test-NvidiaGpu) {
-    $haveOrtGpu = (& $vp -m pip show onnxruntime-gpu 2>$null | Select-String "^Version: 1\.26\.")
-    if ($haveOrtGpu) {
+    $haveOrtGpu = & $vp -c "from importlib.metadata import distributions; print(any(d.metadata['Name'].lower() == 'onnxruntime-gpu' and d.version.startswith('1.26.') for d in distributions()))"
+    if ($LASTEXITCODE -eq 0 -and $haveOrtGpu -eq "True") {
         Log "NVIDIA 显卡在位, onnxruntime-gpu 1.26.x + CUDA 12 运行库已就绪, 跳过"
     } else {
         Log "检测到 NVIDIA 显卡, 安装 GPU 版面识别组件 (下载约 1.5GB, 视网速 2-10 分钟) ..."
         # CPU 版与 GPU 版不能共存(同占 onnxruntime 模块名), 先卸再装
         & $vp -m pip uninstall -y onnxruntime 2>$null | Out-Null
-        Install-PipPackage "onnxruntime-gpu==1.26.0 nvidia-cuda-runtime-cu12==12.9.79 nvidia-cuda-nvrtc-cu12==12.9.86 nvidia-cudnn-cu12==9.27.0.42 nvidia-cublas-cu12==12.9.2.10 nvidia-cufft-cu12==11.4.1.4 nvidia-cusparse-cu12==12.5.10.65 nvidia-cusolver-cu12==11.7.5.82 nvidia-nvjitlink-cu12==12.9.86" "GPU 版面识别组件"
+        $gpuPackages = @("onnxruntime-gpu==1.26.0", "nvidia-cuda-runtime-cu12==12.9.79", "nvidia-cuda-nvrtc-cu12==12.9.86", "nvidia-cudnn-cu12==9.27.0.42", "nvidia-cublas-cu12==12.9.2.10", "nvidia-cufft-cu12==11.4.1.4", "nvidia-cusparse-cu12==12.5.10.65", "nvidia-cusolver-cu12==11.7.5.82", "nvidia-nvjitlink-cu12==12.9.86")
+        Install-PipPackage -spec $gpuPackages -desc "GPU 版面识别组件"
         Log "GPU 组件安装完成 (无 GPU/驱动异常时运行期仍会自动回退 CPU)"
     }
 } else {
@@ -161,51 +174,61 @@ Log "执行: apply_all_patches.py"
 & $vp (Join-Path $repo "script\apply_all_patches.py")
 if ($LASTEXITCODE -ne 0) { Fail "补丁应用失败, 请将上方输出发给作者。" }
 Log "补丁应用完成"
+Log "检查工作台依赖、扫描排版与原生 PDF 绕过路径 ..."
+& $vp (Join-Path $PSScriptRoot "check_workbench.py")
+if ($LASTEXITCODE -ne 0) { Fail "工作台运行检查未通过, 不会报告部署成功。请查看上方错误并重新部署。" }
 
 # ---- 5. Ollama 与模型 ----
 Write-Host "[5/6] 检查 Ollama 与翻译模型 ..."
 $ollama = "ollama"
-if (Get-Command $ollama -ErrorAction SilentlyContinue) {
-    Log "检测到 Ollama: $((Get-Command $ollama).Source)"
+if ($SkipOllama) {
+    Log "按要求跳过 Ollama 安装和模型下载; 请在工作台配置可用的翻译服务。"
 } else {
-    $local = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"
-    if (Test-Path $local) { $ollama = $local; Log "检测到 Ollama (本地安装): $local" }
-}
-if (-not (Get-Command $ollama -ErrorAction SilentlyContinue)) {
-    Log "未检测到 Ollama, 通过 winget 安装 (下载约 1GB) ..."
-    winget install --id Ollama.Ollama -e --accept-source-agreements --accept-package-agreements
-    $local = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"
-    if (Test-Path $local) { $ollama = $local; Log "Ollama 安装完成: $local" }
-    else { Log "[警告] winget 安装后仍未找到 ollama 命令, 可能需要重开终端" }
-}
-if (Get-Command $ollama -ErrorAction SilentlyContinue) {
-    if ($skipModel) {
-        Write-Host "      按要求跳过模型下载。"
+    if (Get-Command $ollama -ErrorAction SilentlyContinue) {
+        Log "检测到 Ollama: $((Get-Command $ollama).Source)"
     } else {
-        Log "下载翻译模型 s2021008840/hy-mt2:7b-q4_k_m (约 4.6GB, 已装则秒过) ..."
-        & $ollama pull s2021008840/hy-mt2:7b-q4_k_m
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "      [警告] 模型下载失败, 稍后手动运行: ollama pull s2021008840/hy-mt2:7b-q4_k_m" -ForegroundColor Yellow
-        } else {
-            Log "翻译模型就绪"
-        }
+        $local = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"
+        if (Test-Path $local) { $ollama = $local; Log "检测到 Ollama (本地安装): $local" }
     }
-} else {
-    Write-Host "      [警告] Ollama 未就绪, 请手动安装 https://ollama.com/download 后运行:" -ForegroundColor Yellow
-    Write-Host "             ollama pull s2021008840/hy-mt2:7b-q4_k_m" -ForegroundColor Yellow
+    if (-not (Get-Command $ollama -ErrorAction SilentlyContinue)) {
+        Log "未检测到 Ollama, 通过 winget 安装 (下载约 1GB) ..."
+        winget install --id Ollama.Ollama -e --accept-source-agreements --accept-package-agreements
+        $local = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"
+        if (Test-Path $local) { $ollama = $local; Log "Ollama 安装完成: $local" }
+        else { Log "[警告] winget 安装后仍未找到 ollama 命令, 可能需要重开终端" }
+    }
+    if (Get-Command $ollama -ErrorAction SilentlyContinue) {
+        if ($skipModel) {
+            Write-Host "      按要求跳过模型下载。"
+        } else {
+            Log "下载翻译模型 s2021008840/hy-mt2:7b-q4_k_m (约 4.6GB, 已装则秒过) ..."
+            & $ollama pull s2021008840/hy-mt2:7b-q4_k_m
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "      [警告] 模型下载失败, 稍后手动运行: ollama pull s2021008840/hy-mt2:7b-q4_k_m" -ForegroundColor Yellow
+            } else {
+                Log "翻译模型就绪"
+            }
+        }
+    } else {
+        Write-Host "      [警告] Ollama 未就绪, 请手动安装 https://ollama.com/download 后运行:" -ForegroundColor Yellow
+        Write-Host "             ollama pull s2021008840/hy-mt2:7b-q4_k_m" -ForegroundColor Yellow
+    }
 }
-
-    # 预下载 BabelDOC 排版/公式模型资产(~1-2GB): 没有这一步, 用户首次翻译时
-    # 才会从 funstory CDN 下载, 国内网络可能很慢甚至失败
-    # 注: pdf2zh_next --warmup 在 2.9.0 会先下载资产、再因缺 input 文件断言退出
-    #     (误报失败), 这里直接调 babeldoc 的 warmup, 干净退出
-    Log "预下载 BabelDOC 模型资产 (版面模型/字体, 实测约 340MB) ..."
+# 预下载 BabelDOC 排版/公式模型资产(~1-2GB): 没有这一步, 用户首次翻译时
+# 才会从 funstory CDN 下载, 国内网络可能很慢甚至失败
+# 注: pdf2zh_next --warmup 在 2.9.0 会先下载资产、再因缺 input 文件断言退出
+#     (误报失败), 这里直接调 babeldoc 的 warmup, 干净退出
+Log "预下载 BabelDOC 模型资产 (版面模型/字体, 实测约 340MB) ..."
+if ($SkipAssets) {
+    Log "按要求跳过资产预下载; 首次使用时仍需联网下载。"
+} else {
     & (Join-Path $venv "Scripts\python.exe") -c "from babeldoc.assets import assets; assets.warmup()"
     if ($LASTEXITCODE -ne 0) {
         Write-Host "      [警告] 资产预下载失败, 首次翻译时会自动重试。" -ForegroundColor Yellow
     } else {
         Log "BabelDOC 资产就绪"
     }
+}
 
 # ---- 6. 启动器与桌面快捷方式 ----
 Write-Host "[6/6] 生成启动器 ..."
@@ -216,12 +239,17 @@ $launcher = Join-Path $repo "start_workbench.bat"
 title PDF Translation Workbench
 cd /d "%~dp0pdf2zh\kernel\PDFMathTranslate-next.git"
 set "PYTHONPATH=%~dp0"
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
 set "PDF2ZH_PORT=$port"
 rem Bypass system proxy for local Ollama (127.0.0.1): a dead system proxy
 rem would swallow localhost requests too (engine check / translation timeouts)
 set "NO_PROXY=127.0.0.1,localhost"
 set "no_proxy=127.0.0.1,localhost"
 ".venv\Scripts\python.exe" -m custom_pdf2zh.webapp.server %PDF2ZH_PORT%
+if errorlevel 1 (
+    echo Workbench failed to start. Run script\setup_windows.bat again.
+)
 pause
 "@ | Out-File -FilePath $launcher -Encoding ascii
 Log "启动器已生成: $launcher"
@@ -286,12 +314,15 @@ Log "部署完成"
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Green
-Write-Host " 部署完成! 正在启动工作台 (浏览器将自动打开, 端口 $port) ..."
+Write-Host " 部署完成! 工作台端口: $port"
+Write-Host " 扫描件: 在设置中选择云端 OCR 并填写 PaddleOCR 访问令牌。"
+Write-Host " 原生文字 PDF 不需要 OCR 令牌; 云端扫描识别需要联网。"
 Write-Host " 日常使用: 双击桌面「PDF翻译工作台」图标(无黑窗, 自动打开网页)"
 Write-Host " 停止服务: 网页右上角「关闭服务」按钮"
 Write-Host "============================================================" -ForegroundColor Green
 Log "完整日志: $logFile"
 try { Stop-Transcript | Out-Null } catch {}
+if ($NoStart) { exit 0 }
 Set-Location $kernel
 $env:PYTHONPATH = $repo
 $env:PDF2ZH_PORT = $port

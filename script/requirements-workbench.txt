@@ -1,0 +1,14 @@
+# The precise workbench is deployed separately from the legacy root package.
+# Install after pdf2zh-next: its PyMuPDF/BabelDOC metadata pins are older than
+# this tested rendering stack. Do not reinstall the root pdf2zh package here.
+babeldoc==0.6.4
+PyMuPDF==1.28.2
+# BabelDOC 0.6.4 imports BitStream, removed in bitstring 5.
+bitstring>=4.2,<5
+requests>=2.32,<3
+numpy>=2.0.2,<3
+opencv-python-headless>=4.10.0.84,<6
+Pillow>=10,<12
+fastapi>=0.115.12,<1
+sse-starlette>=2.3.3,<4
+uvicorn>=0.34.2,<1
