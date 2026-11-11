@@ -29,6 +29,9 @@ const state = {
 /* 视图代际:切换视图的操作(startTranslate/openTask/resetActiveView)都会递增,
    在途的异步渲染醒来后发现代际已变就丢弃,防止旧内容"残影"回填。 */
 let viewSeq = 0;
+let pendingSubmission = null;
+let logTaskId = null;
+const recentTaskLogs = new Map();
 
 /* 单个容器的渲染代际:清空或发起新渲染时递增,旧的 renderPdfList 自动作废。 */
 function nextRenderGen(container) {
@@ -573,8 +576,12 @@ function bindSyncScroll(a, b) {
 // 打开任务(历史条目)→ 双栏对照
 // ---------------------------------------------------------------------------
 
-async function openTask(entry) {
+async function openTask(entry, completedTaskId = null) {
   const seq = ++viewSeq;
+  state.currentTaskId = null;
+  state.lastLogSig = null;
+  selectTaskLog(completedTaskId || recentTaskLogs.get(entry.id)?.taskId, entry.id);
+  $("progress-card").hidden = true;
   state.activeTask = entry;
   renderTaskList();
   $("active-model-name").textContent = shortModel(entry.model || "");
@@ -641,11 +648,28 @@ async function openTask(entry) {
   $("open-dual").dataset.rel = entry.dual || "";
   $("open-alt").dataset.rel = entry.dual || "";
   $("open-mono").dataset.mono = entry.mono || "";
-  $("progress-card").hidden = true;
 }
 
 function focusRunning(entry) {
+  ++viewSeq;
   state.currentTaskId = entry.task_id || null;
+  state.lastLogSig = null;
+  state.activeTask = entry;
+  selectTaskLog(state.currentTaskId, entry.id);
+  renderTaskList();
+  $("source-title").textContent = entry.name;
+  $("result-title").textContent = "翻译中…";
+  $("active-model-name").textContent = shortModel(entry.model || "");
+  for (const id of ["open-mono", "open-dual", "open-alt"]) $(id).disabled = true;
+  const preview = $("source-preview");
+  nextRenderGen(preview);
+  preview.replaceChildren();
+  preview.hidden = !entry.original;
+  $("source-empty").hidden = !!entry.original;
+  if (entry.original) renderPdfList(preview, entry.original).catch(() => {});
+  const result = $("translated-preview");
+  nextRenderGen(result);
+  result.replaceChildren();
   showProgress({ name: entry.name, stage: entry.stage, progress: entry.progress ?? 0, detail: "" });
   showResultView("log");
 }
@@ -685,11 +709,18 @@ async function handleFiles(fileList) {
 async function startTranslate(relPath, name) {
   const seq = ++viewSeq;
   const body = { path: relPath, ...currentSettings() };
-  const res = await fetchJSON("/api/translate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const submission = { completed: new Map(), logs: new Map() };
+  pendingSubmission = submission;
+  let res;
+  try {
+    res = await fetchJSON("/api/translate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } finally {
+    if (pendingSubmission === submission) pendingSubmission = null;
+  }
   if (seq !== viewSeq) return; // 等待期间用户切换了视图,UI 交由最新操作接管
   state.currentTaskId = res.task_id;
   $("source-title").textContent = name;
@@ -699,8 +730,7 @@ async function startTranslate(relPath, name) {
   nextRenderGen(tp); // 作废在途的预览渲染,防止旧内容回填成残影
   tp.innerHTML = "";
   tp.hidden = true;
-  state.logLines = []; // 新任务日志从零开始,不混入上一轮
-  $("log").textContent = "";
+  selectTaskLog(res.task_id);
   state.lastLogSig = null;
   $("result-empty").hidden = true;
   showProgress({ name, stage: "准备中", progress: 0, detail: "" });
@@ -708,7 +738,10 @@ async function startTranslate(relPath, name) {
   $("source-empty").hidden = true;
   $("source-preview").hidden = false;
   renderPdfList($("source-preview"), relPath).catch(() => {});
-  refreshTasks();
+  const completed = submission.completed.get(res.task_id);
+  if (completed) finishFocusedTask(completed);
+  else refreshTasks();
+  submission.logs.get(res.task_id)?.forEach(appendLog);
 }
 
 async function retranslate(entry) {
@@ -718,6 +751,10 @@ async function retranslate(entry) {
 
 function resetActiveView() {
   ++viewSeq;
+  state.currentTaskId = null;
+  selectTaskLog(null);
+  state.lastLogSig = null;
+  $("progress-card").hidden = true;
   nextRenderGen($("source-preview"));
   nextRenderGen($("translated-preview"));
   state.activeTask = null;
@@ -731,8 +768,6 @@ function resetActiveView() {
   $("translated-preview").hidden = true;
   $("result-empty").hidden = false;
   document.querySelectorAll(".result-actions button").forEach((b) => (b.disabled = true));
-  state.logLines = [];
-  $("log").textContent = "";
   $("log").hidden = true;
   showResultView("translation");
 }
@@ -800,6 +835,20 @@ function appendLog(line) {
   if (stick) el.scrollTop = el.scrollHeight;
 }
 
+function selectTaskLog(taskId, jobId) {
+  if (!taskId || logTaskId !== taskId) {
+    const previous = recentTaskLogs.get(jobId);
+    state.logLines = previous && previous.taskId === taskId ? previous.lines : [];
+    logTaskId = taskId || null;
+    $("log").textContent = state.logLines.join("\n");
+  }
+  if (taskId && jobId) {
+    recentTaskLogs.delete(jobId);
+    recentTaskLogs.set(jobId, {taskId, lines: state.logLines});
+    if (recentTaskLogs.size > 20) recentTaskLogs.delete(recentTaskLogs.keys().next().value);
+  }
+}
+
 function showResultView(view) {
   document.querySelectorAll(".view-tab").forEach((b) => {
     b.classList.toggle("active", b.dataset.resultView === view);
@@ -823,6 +872,7 @@ function throttledRefresh() {
 }
 
 function onTaskUpdate(task) {
+  throttledRefresh();
   if (task.id !== state.currentTaskId) return;
   showProgress(task);
   const sig = `${task.stage}|${task.progress}`;
@@ -830,30 +880,43 @@ function onTaskUpdate(task) {
     state.lastLogSig = sig;
     appendLog(`${task.stage} · ${task.progress}%`);
   }
-  throttledRefresh();
 }
 
 let sseConnected = false;
+
+async function finishFocusedTask(task) {
+  const seq = viewSeq;
+  appendLog(task.status === "done" ? `完成: ${task.name}` : `失败: ${task.error}`);
+  $("progress-card").hidden = true;
+  state.currentTaskId = null;
+  state.lastLogSig = null;
+  await refreshTasks(true);
+  if (seq !== viewSeq) return;
+  const hit = state.tasks.find(
+    (t) => (task.mono && t.mono === task.mono) || (task.dual && t.dual === task.dual)
+  );
+  if (hit) openTask(hit, task.id);
+}
 
 function connectSSE() {
   const es = new EventSource("/api/events");
   es.addEventListener("task_update", (ev) => onTaskUpdate(JSON.parse(ev.data).task));
   es.addEventListener("task_done", (ev) => {
     const task = JSON.parse(ev.data).task;
-    appendLog(task.status === "done" ? `完成: ${task.name}` : `失败: ${task.error}`);
     toast(task.status === "done" ? `翻译完成: ${task.name}` : `翻译失败: ${task.error || "见运行日志"}`,
           task.status === "done" ? 3000 : 5000);
-    $("progress-card").hidden = true;
-    state.currentTaskId = null;
-    state.lastLogSig = null;
-    refreshTasks(true).then(() => {
-      const hit = state.tasks.find(
-        (t) => (task.mono && t.mono === task.mono) || (task.dual && t.dual === task.dual)
-      );
-      if (hit && $("translated-preview").childElementCount === 0) openTask(hit);
-    });
+    if (task.id === state.currentTaskId) {
+      finishFocusedTask(task);
+    } else {
+      pendingSubmission?.completed.set(task.id, task);
+      refreshTasks(true);
+    }
   });
-  es.addEventListener("log", (ev) => JSON.parse(ev.data).lines.forEach(appendLog));
+  es.addEventListener("log", (ev) => {
+    const {task_id, lines} = JSON.parse(ev.data);
+    if (task_id === logTaskId) lines.forEach(appendLog);
+    else pendingSubmission?.logs.set(task_id, lines);
+  });
   // 连接状态喂给轮询:SSE 正常时轮询只做低频对账,断流才高频兜底
   es.onopen = () => { sseConnected = true; };
   es.onerror = () => { sseConnected = false; /* EventSource 自动重连 */ };

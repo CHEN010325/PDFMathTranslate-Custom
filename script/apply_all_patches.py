@@ -5,6 +5,7 @@
   1. venv gui.py  — 注入 📚 翻译历史页签(custom_pdf2zh.history_tab)
   2. ollama.py ×2 — num_predict 封顶 8192 / token 统计 None 保护 / 重试 100→5
      (子模块运行副本 + venv site-packages 副本都打)
+  3. BabelDOC PDF 写回 — 替换带隐藏文字层的矢量字形
 
 用法(仓库根目录):
     python script/apply_all_patches.py
@@ -28,8 +29,37 @@ OLLAMA_COPIIES = [
     VENV_SITE / "pdf2zh_next" / "translator" / "translator_impl" / "ollama.py",
 ]
 DOCLAYOUT_PY = VENV_SITE / "babeldoc" / "docvision" / "doclayout.py"
+PDF_CREATER_PY = (
+    VENV_SITE / "babeldoc" / "format" / "pdf" / "document_il" / "backend" / "pdf_creater.py"
+)
 
 problems: list[str] = []
+
+
+def patch_outline_text() -> None:
+    if not PDF_CREATER_PY.exists():
+        problems.append(f"pdf_creater.py 不存在: {PDF_CREATER_PY}")
+        return
+    src = PDF_CREATER_PY.read_text(encoding="utf-8")
+    anchor = "        # Render all units to their appropriate streams\n"
+    replacement = (
+        "        if not skip_char and not translation_config.ocr_workaround:\n"
+        "            from .outline_text_workbench import filter_render_units\n"
+        "\n"
+        "            render_units = filter_render_units(\n"
+        "                self.original_pdf_path, page.page_number, render_units\n"
+        "            )\n"
+        + anchor
+    )
+    if replacement not in src and src.count(anchor) != 1:
+        problems.append("pdf_creater.py: 找不到唯一的矢量文字处理锚点")
+        return
+    helper = PDF_CREATER_PY.with_name("outline_text_workbench.py")
+    source = (REPO / "custom_pdf2zh" / "outline_text.py").read_bytes()
+    if not helper.exists() or helper.read_bytes() != source:
+        helper.write_bytes(source)
+    if replacement not in src:
+        PDF_CREATER_PY.write_text(src.replace(anchor, replacement, 1), encoding="utf-8")
 
 
 def patch_doclayout_gpu() -> None:
@@ -302,6 +332,7 @@ def main() -> int:
     print(f"仓库: {REPO}\n")
     patch_gui()
     patch_doclayout_gpu()
+    patch_outline_text()
     print()
     for ollama_path in OLLAMA_COPIIES:
         patch_ollama(ollama_path)
